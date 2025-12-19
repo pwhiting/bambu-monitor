@@ -17,6 +17,9 @@ CONFIG_FILE = ".bambu_config"
 OUTPUT_DIR = "./bambu_videos"
 STATE_FILE = ".last_avi_state"
 
+# Minimum valid video size (10KB) - videos smaller than this are likely incomplete
+MIN_VIDEO_SIZE = 10240
+
 # Hardcoded defaults (these will be prompted if not in config)
 DEFAULT_VALUES = {
     'FTP_PORT': '990',
@@ -26,7 +29,25 @@ DEFAULT_VALUES = {
 
 def log(msg):
     """Log to stderr with script name prefix"""
-    print(f"{sys.argv[0]}: {msg}", file=sys.stderr)
+    try:
+        print(f"{sys.argv[0]}: {msg}", file=sys.stderr)
+        sys.stderr.flush()
+    except:
+        pass  # Ignore errors writing to stderr
+
+def safe_print(msg):
+    """Print to stdout, handling broken pipe errors gracefully"""
+    try:
+        print(msg)
+        sys.stdout.flush()
+    except BrokenPipeError:
+        # Downstream process closed, exit gracefully
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        sys.exit(0)
+    except Exception as e:
+        log(f"Error writing to stdout: {e}")
+        sys.exit(1)
 
 def load_config():
     """Load configuration from file, or prompt and create if missing"""
@@ -34,16 +55,19 @@ def load_config():
     
     if os.path.exists(CONFIG_FILE):
         # Load existing config
-        with open(CONFIG_FILE, 'r') as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith('#') and '=' in line:
-                    key, value = line.split('=', 1)
-                    # Remove quotes if present
-                    value = value.strip().strip('"').strip("'")
-                    config[key] = value
-        
-        log(f"Loaded config from {CONFIG_FILE}")
+        try:
+            with open(CONFIG_FILE, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith('#') and '=' in line:
+                        key, value = line.split('=', 1)
+                        # Remove quotes if present
+                        value = value.strip().strip('"').strip("'")
+                        config[key] = value
+            
+            log(f"Loaded config from {CONFIG_FILE}")
+        except Exception as e:
+            log(f"Error reading config file: {e}")
     
     # Check for required values and prompt if missing
     required = ['PRINTER_HOST', 'ACCESS_CODE', 'UPDATE_INTERVAL']
@@ -85,21 +109,24 @@ def load_config():
                 config[key] = default
         
         # Save configuration
-        with open(CONFIG_FILE, 'w') as f:
-            f.write("# Bambu Lab Printer Configuration\n")
-            f.write(f"PRINTER_HOST={config['PRINTER_HOST']}\n")
-            f.write(f"ACCESS_CODE={config['ACCESS_CODE']}\n")
-            f.write(f"\n# Update interval in seconds (e.g., 300 = 5 minutes)\n")
-            f.write(f"UPDATE_INTERVAL={config['UPDATE_INTERVAL']}\n")
-            f.write(f"\n# FTP Settings (defaults usually work)\n")
-            f.write(f"FTP_PORT={config.get('FTP_PORT', DEFAULT_VALUES['FTP_PORT'])}\n")
-            f.write(f"FTP_USER={config.get('FTP_USER', DEFAULT_VALUES['FTP_USER'])}\n")
-            f.write(f"TIMELAPSE_PATH={config.get('TIMELAPSE_PATH', DEFAULT_VALUES['TIMELAPSE_PATH'])}\n")
-        
-        # Set restrictive permissions
-        os.chmod(CONFIG_FILE, 0o600)
-        
-        log(f"Configuration saved to {CONFIG_FILE}")
+        try:
+            with open(CONFIG_FILE, 'w') as f:
+                f.write("# Bambu Lab Printer Configuration\n")
+                f.write(f"PRINTER_HOST={config['PRINTER_HOST']}\n")
+                f.write(f"ACCESS_CODE={config['ACCESS_CODE']}\n")
+                f.write(f"\n# Update interval in seconds (e.g., 300 = 5 minutes)\n")
+                f.write(f"UPDATE_INTERVAL={config['UPDATE_INTERVAL']}\n")
+                f.write(f"\n# FTP Settings (defaults usually work)\n")
+                f.write(f"FTP_PORT={config.get('FTP_PORT', DEFAULT_VALUES['FTP_PORT'])}\n")
+                f.write(f"FTP_USER={config.get('FTP_USER', DEFAULT_VALUES['FTP_USER'])}\n")
+                f.write(f"TIMELAPSE_PATH={config.get('TIMELAPSE_PATH', DEFAULT_VALUES['TIMELAPSE_PATH'])}\n")
+            
+            # Set restrictive permissions
+            os.chmod(CONFIG_FILE, 0o600)
+            
+            log(f"Configuration saved to {CONFIG_FILE}")
+        except Exception as e:
+            log(f"Error saving config file: {e}")
     
     # Apply defaults for any missing optional values
     for key, default in DEFAULT_VALUES.items():
@@ -152,10 +179,14 @@ def list_timelapse_directory(config, debug=False):
             if '.avi' in line and not line.startswith('d'):
                 parts = line.split()
                 if len(parts) >= 9:
-                    size = int(parts[4])
-                    filename = ' '.join(parts[8:])
-                    timestamp = parse_timestamp_from_filename(filename)
-                    files.append((timestamp, filename, size))
+                    try:
+                        size = int(parts[4])
+                        filename = ' '.join(parts[8:])
+                        timestamp = parse_timestamp_from_filename(filename)
+                        files.append((timestamp, filename, size))
+                    except (ValueError, IndexError) as e:
+                        log(f"Error parsing line: {line[:100]}")
+                        continue
         
         if not files:
             log("No timelapse videos found")
@@ -167,27 +198,36 @@ def list_timelapse_directory(config, debug=False):
         latest = files[-1]
         return latest[1], latest[2]  # filename, size
         
+    except subprocess.TimeoutExpired:
+        log("Timeout listing directory")
+        return None, None
     except Exception as e:
-        log(f"Error: {e}")
+        log(f"Error listing directory: {e}")
         return None, None
 
 def get_last_state():
     """Get the last downloaded video name and size"""
     state_path = os.path.join(OUTPUT_DIR, STATE_FILE)
-    if os.path.exists(state_path):
-        with open(state_path, 'r') as f:
-            line = f.read().strip()
-            if '|' in line:
-                name, size = line.split('|')
-                return name, int(size)
+    try:
+        if os.path.exists(state_path):
+            with open(state_path, 'r') as f:
+                line = f.read().strip()
+                if '|' in line:
+                    name, size = line.split('|', 1)
+                    return name, int(size)
+    except Exception as e:
+        log(f"Error reading state file: {e}")
     return None, None
 
 def save_state(filename, size):
     """Save the current video name and size"""
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    state_path = os.path.join(OUTPUT_DIR, STATE_FILE)
-    with open(state_path, 'w') as f:
-        f.write(f"{filename}|{size}")
+    try:
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
+        state_path = os.path.join(OUTPUT_DIR, STATE_FILE)
+        with open(state_path, 'w') as f:
+            f.write(f"{filename}|{size}")
+    except Exception as e:
+        log(f"Error saving state: {e}")
 
 def download_video(config, remote_filename):
     """Download the timelapse video"""
@@ -214,18 +254,43 @@ def download_video(config, remote_filename):
         )
         
         if result.returncode != 0:
-            log(f"Download failed: {result.stderr.decode()}")
+            stderr_msg = result.stderr.decode() if result.stderr else "Unknown error"
+            log(f"Download failed: {stderr_msg[:200]}")
+            # Clean up partial download
+            if os.path.exists(local_path):
+                try:
+                    os.remove(local_path)
+                except:
+                    pass
             return None
         
         if os.path.exists(local_path):
             file_size = os.path.getsize(local_path)
             log(f"Downloaded {file_size:,} bytes")
+            
+            # Validate file size
+            if file_size < MIN_VIDEO_SIZE:
+                log(f"Warning: File is too small ({file_size} bytes), likely incomplete")
+                try:
+                    os.remove(local_path)
+                except:
+                    pass
+                return None
+            
             return local_path
         
+        log("Download completed but file not found")
         return None
         
     except subprocess.TimeoutExpired:
         log("Download timeout")
+        # Clean up partial download
+        local_path = os.path.join(OUTPUT_DIR, remote_filename)
+        if os.path.exists(local_path):
+            try:
+                os.remove(local_path)
+            except:
+                pass
         return None
     except Exception as e:
         log(f"Download error: {e}")
@@ -233,38 +298,57 @@ def download_video(config, remote_filename):
 
 def check_and_download(config, debug=False):
     """Check for new video and download if changed"""
-    # Find latest video
-    latest_video, latest_size = list_timelapse_directory(config, debug)
-    
-    if not latest_video:
-        log("No videos available")
+    try:
+        # Find latest video
+        latest_video, latest_size = list_timelapse_directory(config, debug)
+        
+        if not latest_video:
+            log("No videos available")
+            return False
+        
+        # Skip videos that are too small (likely still being created)
+        if latest_size < MIN_VIDEO_SIZE:
+            log(f"Video too small ({latest_size:,} bytes), skipping (likely still being created)")
+            return False
+        
+        # Check if this video has changed
+        last_name, last_size = get_last_state()
+        
+        if last_name == latest_video and last_size == latest_size:
+            log(f"Video unchanged: {latest_video} ({latest_size:,} bytes)")
+            # Don't output anything - only output on new downloads
+            return False
+        
+        log(f"New or changed video: {latest_video} ({latest_size:,} bytes)")
+        
+        # Download it
+        video_path = download_video(config, latest_video)
+        
+        if not video_path:
+            log("Download failed, will retry on next check")
+            return False
+        
+        # Verify the downloaded file
+        try:
+            actual_size = os.path.getsize(video_path)
+            if actual_size < MIN_VIDEO_SIZE:
+                log(f"Downloaded file too small ({actual_size} bytes), not saving state")
+                os.remove(video_path)
+                return False
+        except Exception as e:
+            log(f"Error verifying downloaded file: {e}")
+            return False
+        
+        # Save state only after successful download and validation
+        save_state(latest_video, actual_size)
+        
+        # Output path to stdout using safe print
+        safe_print(video_path)
+        return True
+        
+    except Exception as e:
+        log(f"Unexpected error in check_and_download: {e}")
         return False
-    
-    # Check if this video has changed
-    last_name, last_size = get_last_state()
-    
-    if last_name == latest_video and last_size == latest_size:
-        log(f"Video unchanged: {latest_video} ({latest_size:,} bytes)")
-        local_path = os.path.join(OUTPUT_DIR, latest_video)
-        if os.path.exists(local_path):
-            return True
-        else:
-            log("Cached file missing, will re-download")
-    
-    log(f"New or changed video: {latest_video} ({latest_size:,} bytes)")
-    
-    # Download it
-    video_path = download_video(config, latest_video)
-    
-    if not video_path:
-        return False
-    
-    # Save state
-    save_state(latest_video, latest_size)
-    
-    # Output path to stdout
-    print(video_path)
-    return True
 
 def main():
     """Main function"""
@@ -277,41 +361,62 @@ def main():
                         help='Show debug information')
     args = parser.parse_args()
     
-    # Load configuration
-    config = load_config()
-    
-    if args.debug:
-        log(f"Config: PRINTER_HOST={config['PRINTER_HOST']}, FTP_PORT={config['FTP_PORT']}")
-    
-    # Determine update interval
-    if args.interval:
-        update_interval = args.interval
-        log(f"Using command-line interval: {update_interval}s")
-    else:
-        update_interval = int(config['UPDATE_INTERVAL'])
-        log(f"Using config interval: {update_interval}s")
-    
-    # Run once or loop
-    if args.once:
-        if not check_and_download(config, args.debug):
-            sys.exit(1)
-    else:
-        log("Starting loop (Ctrl+C to stop)")
-        iteration = 0
-        try:
+    try:
+        # Load configuration
+        config = load_config()
+        
+        if args.debug:
+            log(f"Config: PRINTER_HOST={config['PRINTER_HOST']}, FTP_PORT={config['FTP_PORT']}")
+        
+        # Determine update interval
+        if args.interval:
+            update_interval = args.interval
+            log(f"Using command-line interval: {update_interval}s")
+        else:
+            update_interval = int(config['UPDATE_INTERVAL'])
+            log(f"Using config interval: {update_interval}s")
+        
+        # Run once or loop
+        if args.once:
+            success = check_and_download(config, args.debug)
+            sys.exit(0 if success else 1)
+        else:
+            log("Starting loop (Ctrl+C to stop)")
+            iteration = 0
+            consecutive_errors = 0
+            
             while True:
                 iteration += 1
                 log(f"Check #{iteration}")
                 
-                check_and_download(config, args.debug and iteration == 1)
+                try:
+                    success = check_and_download(config, args.debug and iteration == 1)
+                    
+                    if success:
+                        consecutive_errors = 0
+                    elif consecutive_errors < 5:
+                        # Don't count "no new video" as an error
+                        pass
+                    
+                except Exception as e:
+                    consecutive_errors += 1
+                    log(f"Error in iteration {iteration}: {e}")
+                    
+                    if consecutive_errors >= 10:
+                        log("Too many consecutive errors, exiting")
+                        sys.exit(1)
                 
                 if iteration == 1:
                     log(f"Waiting {update_interval}s until next check...")
                 
                 time.sleep(update_interval)
                 
-        except KeyboardInterrupt:
-            log("Stopped by user")
+    except KeyboardInterrupt:
+        log("Stopped by user")
+        sys.exit(0)
+    except Exception as e:
+        log(f"Fatal error: {e}")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()

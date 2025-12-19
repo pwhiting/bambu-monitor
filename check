@@ -8,49 +8,171 @@ import sys
 import base64
 import os
 import argparse
+import time
 from openai import OpenAI
+from openai import APIError, APIConnectionError, RateLimitError, APITimeoutError
+
+# Minimum valid image size (1KB)
+MIN_IMAGE_SIZE = 1024
+
+# Maximum image size to send to API (20MB)
+MAX_IMAGE_SIZE = 20 * 1024 * 1024
+
+# Retry configuration
+MAX_RETRIES = 3
+RETRY_DELAY = 2  # seconds
+RATE_LIMIT_DELAY = 60  # seconds to wait on rate limit
 
 def log(msg):
     """Log to stderr with script name prefix"""
-    print(f"{sys.argv[0]}: {msg}", file=sys.stderr)
+    try:
+        print(f"{sys.argv[0]}: {msg}", file=sys.stderr)
+        sys.stderr.flush()
+    except:
+        pass  # Ignore errors writing to stderr
+
+def safe_print(msg):
+    """Print to stdout, handling broken pipe errors gracefully"""
+    try:
+        print(msg)
+        sys.stdout.flush()
+    except BrokenPipeError:
+        # Downstream process closed, exit gracefully
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        sys.exit(0)
+    except Exception as e:
+        log(f"Error writing to stdout: {e}")
+        sys.exit(1)
+
+def validate_image(image_path):
+    """Check if image file is valid for processing"""
+    try:
+        if not os.path.exists(image_path):
+            log(f"File not found: {image_path}")
+            return False
+        
+        if not os.path.isfile(image_path):
+            log(f"Not a file: {image_path}")
+            return False
+        
+        file_size = os.path.getsize(image_path)
+        
+        if file_size < MIN_IMAGE_SIZE:
+            log(f"Image too small ({file_size} bytes): {image_path}")
+            return False
+        
+        if file_size > MAX_IMAGE_SIZE:
+            log(f"Image too large ({file_size} bytes, max {MAX_IMAGE_SIZE}): {image_path}")
+            return False
+        
+        # Check if file is readable
+        if not os.access(image_path, os.R_OK):
+            log(f"File not readable: {image_path}")
+            return False
+        
+        # Validate file extension
+        valid_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp']
+        ext = os.path.splitext(image_path)[1].lower()
+        if ext not in valid_extensions:
+            log(f"Invalid image extension '{ext}' (expected one of: {', '.join(valid_extensions)})")
+            return False
+        
+        return True
+    except Exception as e:
+        log(f"Error validating image: {e}")
+        return False
 
 def encode_image(image_path):
     """Encode image file to base64 string."""
-    with open(image_path, "rb") as image_file:
-        return base64.b64encode(image_file.read()).decode('utf-8')
+    try:
+        with open(image_path, "rb") as image_file:
+            return base64.b64encode(image_file.read()).decode('utf-8')
+    except Exception as e:
+        log(f"Error encoding image: {e}")
+        return None
+
+def check_print_with_retry(client, model, image_path, max_retries=MAX_RETRIES):
+    """Check if the print is failing using the specified model with retry logic."""
+    
+    for attempt in range(1, max_retries + 1):
+        try:
+            base64_image = encode_image(image_path)
+            if not base64_image:
+                return None, "Failed to encode image"
+            
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Reply just yes or no. Is this image from a Bambu P1S likely a failing print? Return 'no' if the print appears to just be starting. Be moderately sure before replying yes"
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/jpeg;base64,{base64_image}"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                timeout=30.0
+            )
+            
+            result = response.choices[0].message.content.strip()
+            return result, None
+            
+        except RateLimitError as e:
+            if attempt < max_retries:
+                log(f"Rate limit hit (attempt {attempt}/{max_retries}), waiting {RATE_LIMIT_DELAY}s...")
+                time.sleep(RATE_LIMIT_DELAY)
+                continue
+            return None, f"Rate limit exceeded: {str(e)}"
+        
+        except APITimeoutError as e:
+            if attempt < max_retries:
+                log(f"API timeout (attempt {attempt}/{max_retries}), retrying...")
+                time.sleep(RETRY_DELAY)
+                continue
+            return None, f"API timeout: {str(e)}"
+        
+        except APIConnectionError as e:
+            if attempt < max_retries:
+                log(f"Connection error (attempt {attempt}/{max_retries}), retrying...")
+                time.sleep(RETRY_DELAY)
+                continue
+            return None, f"Connection error: {str(e)}"
+        
+        except APIError as e:
+            # Don't retry on general API errors (usually auth or invalid request)
+            return None, f"API error: {str(e)}"
+        
+        except Exception as e:
+            return None, f"Unexpected error: {str(e)}"
+    
+    return None, "Max retries exceeded"
 
 def check_print(client, model, image_path):
     """Check if the print is failing using the specified model."""
     try:
+        # Validate image first
+        if not validate_image(image_path):
+            return None
+        
         log(f"Checking {os.path.basename(image_path)} with {model}")
         
-        base64_image = encode_image(image_path)
+        result, error = check_print_with_retry(client, model, image_path)
         
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": "Reply just yes or no. Is this image from a Bambu P1S likely a failing print? Return 'no' if the print appears to just be starting. Be moderately sure before replying yes"
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/jpeg;base64,{base64_image}"
-                            }
-                        }
-                    ]
-                }
-            ]
-        )
-        
-        result = response.choices[0].message.content.strip()
+        if error:
+            log(f"Check failed: {error}")
+            return None
         
         # Always print model output to stderr
-        print(f"Model response: {result}", file=sys.stderr)
+        log(f"Model response: {result}")
         
         return result
         
@@ -75,46 +197,97 @@ def main():
     
     args = parser.parse_args()
     
-    # Get API key from environment
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        log("Error: OPENAI_API_KEY environment variable not set")
-        sys.exit(1)
-    
-    # Initialize OpenAI client
-    client = OpenAI(api_key=api_key)
-    
-    # Process single file from command line or read from stdin
-    if args.image:
-        # Single file from command line
-        image_path = args.image
-        
-        if not os.path.exists(image_path):
-            log(f"File not found: {image_path}")
+    try:
+        # Get API key from environment
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            log("Error: OPENAI_API_KEY environment variable not set")
             sys.exit(1)
         
-        result = check_print(client, args.model, image_path)
-        if result and "yes" in result.lower():
-            # Print filename to stdout for downstream processing
-            print(image_path)
-            sys.stdout.flush()
-    else:
-        # Read image paths from stdin
-        for line in sys.stdin:
-            image_path = line.strip()
-            
-            if not image_path:
-                continue
-            
-            if not os.path.exists(image_path):
-                log(f"File not found: {image_path}")
-                continue
+        # Initialize OpenAI client
+        try:
+            client = OpenAI(api_key=api_key)
+        except Exception as e:
+            log(f"Error initializing OpenAI client: {e}")
+            sys.exit(1)
+        
+        # Process single file from command line or read from stdin
+        if args.image:
+            # Single file from command line
+            image_path = args.image
             
             result = check_print(client, args.model, image_path)
             if result and "yes" in result.lower():
                 # Print filename to stdout for downstream processing
-                print(image_path)
-                sys.stdout.flush()
+                safe_print(image_path)
+                sys.exit(0)
+            elif result:
+                # Model said no - success but don't output
+                sys.exit(0)
+            else:
+                # Error occurred
+                sys.exit(1)
+        else:
+            # Read image paths from stdin
+            consecutive_errors = 0
+            processed_count = 0
+            failure_count = 0
+            
+            for line in sys.stdin:
+                image_path = line.strip()
+                
+                if not image_path:
+                    continue
+                
+                try:
+                    result = check_print(client, args.model, image_path)
+                    
+                    if result:
+                        processed_count += 1
+                        consecutive_errors = 0
+                        
+                        if "yes" in result.lower():
+                            # Print filename to stdout for downstream processing
+                            safe_print(image_path)
+                            failure_count += 1
+                    else:
+                        consecutive_errors += 1
+                        log(f"Failed to check {image_path}")
+                        
+                        # If too many consecutive errors, exit
+                        if consecutive_errors >= 10:
+                            log("Too many consecutive errors, exiting")
+                            sys.exit(1)
+                        
+                        # Continue processing next file
+                        continue
+                        
+                except Exception as e:
+                    consecutive_errors += 1
+                    log(f"Error processing {image_path}: {e}")
+                    
+                    if consecutive_errors >= 10:
+                        log("Too many consecutive errors, exiting")
+                        sys.exit(1)
+                    
+                    continue
+            
+            # Summary logging
+            if processed_count > 0:
+                log(f"Processed {processed_count} images, {failure_count} failures detected")
+            
+            # If we processed at least one file successfully, exit with success
+            if processed_count > 0:
+                sys.exit(0)
+            else:
+                sys.exit(1)
+                
+    except KeyboardInterrupt:
+        log("Stopped by user")
+        sys.exit(0)
+    except Exception as e:
+        log(f"Fatal error: {e}")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
