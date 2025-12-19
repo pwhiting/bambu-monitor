@@ -131,10 +131,9 @@ def main():
         help="Video file path"
     )
     parser.add_argument(
-        "output",
-        nargs="?",
-        default="snapshot.jpg",
-        help="Output filename (default: snapshot.jpg)"
+        "--output", "-o",
+        default="./bambu_images/latest.jpg",
+        help="Output filename (default: ./bambu_images/latest.jpg)"
     )
     args = parser.parse_args()
     
