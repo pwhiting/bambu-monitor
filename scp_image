@@ -108,12 +108,12 @@ def main():
         description="Copy file to remote server via SCP"
     )
     parser.add_argument(
-        "destination",
-        help="SCP destination (e.g., user@host:path)"
-    )
-    parser.add_argument(
         "file",
         help="File to copy"
+    )
+    parser.add_argument(
+        "destination",
+        help="SCP destination (e.g., user@host:path)"
     )
     
     args = parser.parse_args()
