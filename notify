@@ -1,8 +1,136 @@
-# Just send notification (no output)
-notify "PrintComplete"
+#!/usr/bin/env python3
+"""
+Send notification via Pushcut webhook.
+Takes a notification name as argument.
+Optionally takes a trigger value as second argument to pass through pipeline.
+Use with 'loop' for processing multiple triggers.
+"""
+import sys
+import os
+import argparse
+import requests
+import time
 
-# Send notification and pass through a value
-notify "PrintComplete" "/path/to/video.mp4"
+# Retry configuration
+MAX_RETRIES = 3
+RETRY_DELAY = 2
+RATE_LIMIT_DELAY = 60
 
-# Use in a loop
-loop -e mp4 -d ~/videos | notify "NewVideo"
+def log(msg):
+    """Log to stderr with script name prefix"""
+    try:
+        print(f"{sys.argv[0]}: {msg}", file=sys.stderr)
+        sys.stderr.flush()
+    except:
+        pass
+
+def send_notification_with_retry(webhook_secret, notification_name, max_retries=MAX_RETRIES):
+    """Send notification via Pushcut webhook with retry logic"""
+    
+    url = f"https://api.pushcut.io/{webhook_secret}/notifications/{notification_name}"
+    
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = requests.post(
+                url,
+                json={},
+                timeout=10.0
+            )
+            
+            if response.status_code == 200:
+                return True, None
+            
+            elif response.status_code == 429:
+                if attempt < max_retries:
+                    log(f"Rate limited (attempt {attempt}/{max_retries}), waiting {RATE_LIMIT_DELAY}s...")
+                    time.sleep(RATE_LIMIT_DELAY)
+                    continue
+                return False, f"Rate limit exceeded"
+            
+            elif 500 <= response.status_code < 600:
+                if attempt < max_retries:
+                    log(f"Server error {response.status_code} (attempt {attempt}/{max_retries}), retrying...")
+                    time.sleep(RETRY_DELAY)
+                    continue
+                return False, f"Server error (HTTP {response.status_code})"
+            
+            elif 400 <= response.status_code < 500:
+                return False, f"Client error (HTTP {response.status_code}): Check webhook secret and notification name"
+            
+            else:
+                return False, f"Unexpected status code: {response.status_code}"
+                
+        except requests.exceptions.Timeout:
+            if attempt < max_retries:
+                log(f"Request timeout (attempt {attempt}/{max_retries}), retrying...")
+                time.sleep(RETRY_DELAY)
+                continue
+            return False, "Request timeout"
+        
+        except requests.exceptions.ConnectionError as e:
+            if attempt < max_retries:
+                log(f"Connection error (attempt {attempt}/{max_retries}), retrying...")
+                time.sleep(RETRY_DELAY)
+                continue
+            return False, f"Connection error"
+        
+        except requests.exceptions.RequestException as e:
+            return False, f"Request error: {str(e)}"
+        
+        except Exception as e:
+            return False, f"Unexpected error: {str(e)}"
+    
+    return False, "Max retries exceeded"
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Send notification via Pushcut webhook"
+    )
+    parser.add_argument(
+        "notification",
+        help="Pushcut notification name to trigger"
+    )
+    parser.add_argument(
+        "trigger",
+        nargs="?",
+        help="Optional trigger value to pass through to stdout"
+    )
+    
+    args = parser.parse_args()
+    
+    try:
+        # Get webhook secret
+        webhook_secret = os.getenv("PUSHCUT_WEBHOOK_SECRET")
+        if not webhook_secret:
+            log("Error: PUSHCUT_WEBHOOK_SECRET environment variable not set")
+            sys.exit(1)
+        
+        # Validate notification name
+        if not args.notification or not args.notification.strip():
+            log("Error: Notification name cannot be empty")
+            sys.exit(1)
+        
+        log(f"Triggering notification: {args.notification}")
+        
+        success, error = send_notification_with_retry(webhook_secret, args.notification)
+        
+        if success:
+            log("Notification sent successfully")
+            # Only output trigger value if one was provided
+            if args.trigger:
+                print(args.trigger)
+                sys.stdout.flush()
+            sys.exit(0)
+        else:
+            log(f"Notification failed: {error}")
+            sys.exit(1)
+            
+    except KeyboardInterrupt:
+        log("Stopped by user")
+        sys.exit(1)
+    except Exception as e:
+        log(f"Fatal error: {e}")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
