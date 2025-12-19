@@ -1,0 +1,120 @@
+#!/usr/bin/env python3
+"""
+Check if a Bambu P1S 3D print image shows a failing print.
+Uses OpenAI's vision API for cost-efficient analysis.
+Reads image paths from stdin or from command-line argument.
+"""
+import sys
+import base64
+import os
+import argparse
+from openai import OpenAI
+
+def log(msg):
+    """Log to stderr with script name prefix"""
+    print(f"{sys.argv[0]}: {msg}", file=sys.stderr)
+
+def encode_image(image_path):
+    """Encode image file to base64 string."""
+    with open(image_path, "rb") as image_file:
+        return base64.b64encode(image_file.read()).decode('utf-8')
+
+def check_print(client, model, image_path):
+    """Check if the print is failing using the specified model."""
+    try:
+        log(f"Checking {os.path.basename(image_path)} with {model}")
+        
+        base64_image = encode_image(image_path)
+        
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Reply just yes or no. Is this image from a Bambu P1S likely a failing print? Return 'no' if the print appears to just be starting. Be moderately sure before replying yes"
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{base64_image}"
+                            }
+                        }
+                    ]
+                }
+            ]
+        )
+        
+        result = response.choices[0].message.content.strip()
+        
+        # Always print model output to stderr
+        print(f"Model response: {result}", file=sys.stderr)
+        
+        return result
+        
+    except Exception as e:
+        log(f"Error: {e}")
+        return None
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Check if a 3D print image shows a failing print using OpenAI vision models"
+    )
+    parser.add_argument(
+        "image",
+        nargs="?",
+        help="Path to the image file (if not provided, reads from stdin)",
+    )
+    parser.add_argument(
+        "-m", "--model",
+        default="gpt-5.1",
+        help="Model to use (default: gpt-5.1)"
+    )
+    
+    args = parser.parse_args()
+    
+    # Get API key from environment
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        log("Error: OPENAI_API_KEY environment variable not set")
+        sys.exit(1)
+    
+    # Initialize OpenAI client
+    client = OpenAI(api_key=api_key)
+    
+    # Process single file from command line or read from stdin
+    if args.image:
+        # Single file from command line
+        image_path = args.image
+        
+        if not os.path.exists(image_path):
+            log(f"File not found: {image_path}")
+            sys.exit(1)
+        
+        result = check_print(client, args.model, image_path)
+        if result and "yes" in result.lower():
+            # Print filename to stdout for downstream processing
+            print(image_path)
+            sys.stdout.flush()
+    else:
+        # Read image paths from stdin
+        for line in sys.stdin:
+            image_path = line.strip()
+            
+            if not image_path:
+                continue
+            
+            if not os.path.exists(image_path):
+                log(f"File not found: {image_path}")
+                continue
+            
+            result = check_print(client, args.model, image_path)
+            if result and "yes" in result.lower():
+                # Print filename to stdout for downstream processing
+                print(image_path)
+                sys.stdout.flush()
+
+if __name__ == "__main__":
+    main()
