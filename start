@@ -1,0 +1,6 @@
+EXPORT OPENAI_API_KEY=sk-proj-7h...
+PUSHCUT_WEBHOOK_SECRET=uzJ...
+
+cd ~/bambu-monitor
+
+./last_avi | ./loop ./last_image | ./loop ./scp_image user@site.com:/directory/ | ./loop ./check | ./loop ./notify Bambu

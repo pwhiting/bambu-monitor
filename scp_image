@@ -1,0 +1,147 @@
+#!/usr/bin/env python3
+"""
+Copy image file to remote server via SCP.
+Takes a file path and destination as arguments.
+Outputs the file path to stdout on success.
+Use with 'loop' for processing multiple files.
+"""
+import sys
+import os
+import argparse
+import subprocess
+import time
+
+# Minimum valid file size (1KB)
+MIN_FILE_SIZE = 1024
+
+# Retry configuration
+MAX_RETRIES = 3
+RETRY_DELAY = 2
+
+def log(msg):
+    """Log to stderr with script name prefix"""
+    try:
+        print(f"{sys.argv[0]}: {msg}", file=sys.stderr)
+        sys.stderr.flush()
+    except:
+        pass
+
+def validate_file(filepath):
+    """Check if file exists and is large enough to upload"""
+    try:
+        if not os.path.exists(filepath):
+            log(f"File not found: {filepath}")
+            return False
+        
+        if not os.path.isfile(filepath):
+            log(f"Not a file: {filepath}")
+            return False
+        
+        file_size = os.path.getsize(filepath)
+        if file_size < MIN_FILE_SIZE:
+            log(f"File too small ({file_size} bytes): {filepath}")
+            return False
+        
+        if not os.access(filepath, os.R_OK):
+            log(f"File not readable: {filepath}")
+            return False
+        
+        return True
+    except Exception as e:
+        log(f"Error validating file: {e}")
+        return False
+
+def scp_file_with_retry(filepath, destination, max_retries=MAX_RETRIES):
+    """Copy file to remote destination via SCP with retry logic"""
+    
+    for attempt in range(1, max_retries + 1):
+        try:
+            result = subprocess.run(
+                ["scp", "-q", filepath, destination],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=120
+            )
+            
+            if result.returncode == 0:
+                return True, None
+            
+            error_msg = result.stderr.strip() if result.stderr else f"Exit code {result.returncode}"
+            
+            # Check if it's a transient error worth retrying
+            transient_errors = [
+                'Connection refused',
+                'Connection reset',
+                'Connection timed out',
+                'Network is unreachable',
+                'Temporary failure',
+                'Resource temporarily unavailable'
+            ]
+            
+            is_transient = any(err.lower() in error_msg.lower() for err in transient_errors)
+            
+            if is_transient and attempt < max_retries:
+                log(f"Transient error (attempt {attempt}/{max_retries}): {error_msg[:100]}")
+                time.sleep(RETRY_DELAY)
+                continue
+            
+            return False, error_msg
+            
+        except subprocess.TimeoutExpired:
+            if attempt < max_retries:
+                log(f"Upload timeout (attempt {attempt}/{max_retries}), retrying...")
+                time.sleep(RETRY_DELAY)
+                continue
+            return False, "Upload timeout"
+        
+        except FileNotFoundError:
+            return False, "scp command not found - please install openssh-client"
+        
+        except Exception as e:
+            return False, str(e)
+    
+    return False, "Max retries exceeded"
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Copy file to remote server via SCP"
+    )
+    parser.add_argument(
+        "destination",
+        help="SCP destination (e.g., user@host:path)"
+    )
+    parser.add_argument(
+        "file",
+        help="File to copy"
+    )
+    
+    args = parser.parse_args()
+    
+    try:
+        # Validate input file
+        if not validate_file(args.file):
+            sys.exit(1)
+        
+        log(f"Uploading {os.path.basename(args.file)}...")
+        
+        success, error_msg = scp_file_with_retry(args.file, args.destination)
+        
+        if success:
+            log("Success")
+            print(args.file)
+            sys.stdout.flush()
+            sys.exit(0)
+        else:
+            log(f"Upload failed: {error_msg[:200]}")
+            sys.exit(1)
+            
+    except KeyboardInterrupt:
+        log("Stopped by user")
+        sys.exit(1)
+    except Exception as e:
+        log(f"Fatal error: {e}")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
