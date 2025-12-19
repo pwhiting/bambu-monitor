@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Bambu P1S Print Monitor</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            background-color: #1a1a1a;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        }
+        .container {
+            max-width: 1200px;
+            width: 100%;
+        }
+        .header {
+            color: #fff;
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        .header h1 {
+            margin: 0 0 10px 0;
+            font-size: 24px;
+            font-weight: 600;
+        }
+        .header .status {
+            color: #888;
+            font-size: 14px;
+        }
+        .header .timestamp {
+            color: #00ff00;
+            font-family: monospace;
+            font-size: 12px;
+            margin-top: 5px;
+        }
+        .header .age {
+            color: #ff9900;
+            font-family: monospace;
+            font-size: 14px;
+            margin-top: 5px;
+            font-weight: 600;
+        }
+        .image-container {
+            background-color: #000;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+        }
+        img {
+            width: 100%;
+            height: auto;
+            display: block;
+            transition: opacity 0.3s;
+        }
+        .footer {
+            color: #666;
+            text-align: center;
+            margin-top: 20px;
+            font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Bambu Print Monitor</h1>
+            <div class="age" id="imageAge">Checking image age...</div>
+            <div class="status" id="countdown">Next refresh in 60s</div>
+        </div>
+        <div class="image-container">
+            <img src="snapshot.jpg" id="snapshot" alt="Print Monitor">
+        </div>
+        <div class="footer">
+            Live print monitoring
+        </div>
+    </div>
+    <script>
+        const REFRESH_INTERVAL = 60000; // 60 seconds
+        let countdownSeconds = 60;
+        let imageTimestamp = null;
+        
+        function formatAge(seconds) {
+            const minutes = Math.floor(seconds / 60);
+            const secs = seconds % 60;
+            
+            if (minutes > 0) {
+                return `${minutes}m ${secs}s old`;
+            } else {
+                return `${secs}s old`;
+            }
+        }
+        
+        async function getImageTimestamp() {
+            try {
+                const response = await fetch('snapshot.jpg', { 
+                    method: 'HEAD',
+                    cache: 'no-cache'
+                });
+                const lastModified = response.headers.get('Last-Modified');
+                if (lastModified) {
+                    imageTimestamp = new Date(lastModified);
+                }
+            } catch (error) {
+                console.error('Error fetching image timestamp:', error);
+            }
+        }
+        
+        function updateImageAge() {
+            if (imageTimestamp) {
+                const now = new Date();
+                const ageMs = now - imageTimestamp;
+                const ageSeconds = Math.floor(ageMs / 1000);
+                document.getElementById('imageAge').textContent = 
+                    'Image: ' + formatAge(ageSeconds);
+            }
+        }
+        
+        function updateCountdown() {
+            document.getElementById('countdown').textContent = 
+                `Next refresh in ${countdownSeconds}s`;
+            
+            if (countdownSeconds > 0) {
+                countdownSeconds--;
+            } else {
+                countdownSeconds = REFRESH_INTERVAL / 1000;
+            }
+        }
+        
+        async function updateImage() {
+            const img = document.getElementById('snapshot');
+            const timestamp = new Date().getTime();
+            img.src = 'snapshot.jpg?t=' + timestamp;
+            
+            // Get the new image timestamp
+            await getImageTimestamp();
+            updateImageAge();
+            
+            // Reset countdown
+            countdownSeconds = REFRESH_INTERVAL / 1000;
+        }
+        
+        // Initial load
+        updateImage();
+        
+        // Update countdown every second
+        setInterval(updateCountdown, 1000);
+        
+        // Update image age display every second
+        setInterval(updateImageAge, 1000);
+        
+        // Refresh image every 60 seconds
+        setInterval(updateImage, REFRESH_INTERVAL);
+    </script>
+</body>
+</html>

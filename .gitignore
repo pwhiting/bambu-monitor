@@ -1,0 +1,14 @@
+.bambu_config
+access_code.txt
+bambu_videos/
+*.pyc
+__pycache__/
+.DS_Store
+*.swp
+*.tmp.jpg
+*.jpg
+*.png
+*.avi
+.python*
+test*
+old/*
