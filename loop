@@ -2,6 +2,7 @@
 """
 Loop wrapper for single-item processing commands.
 Reads items from stdin and calls the wrapped command for each item.
+Use {} as placeholder for stdin value, otherwise appended at end.
 Handles errors gracefully and passes successful outputs downstream.
 """
 import sys
@@ -75,10 +76,23 @@ def setup_signal_handlers():
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
 
+def build_command(template, item):
+    """Build command by replacing {} with item, or appending if no {} found"""
+    # Check if any argument contains {}
+    has_placeholder = any('{}' in arg for arg in template)
+    
+    if has_placeholder:
+        # Replace all {} occurrences with the item
+        return [arg.replace('{}', item) for arg in template]
+    else:
+        # Default behavior: append item at the end
+        return template + [item]
+
 def main():
     if len(sys.argv) < 2:
         log("Usage: loop <command> [args...]")
         log("Reads items from stdin and calls <command> with each item")
+        log("Use {} as placeholder for stdin value, otherwise appended at end")
         sys.exit(1)
     
     # Command to execute (everything after 'loop')
@@ -103,9 +117,12 @@ def main():
                 continue
             
             try:
-                # Call the command with the item as an argument
+                # Build the command with item substitution
+                cmd = build_command(command, item)
+                
+                # Call the command
                 result = subprocess.run(
-                    command + [item],
+                    cmd,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
