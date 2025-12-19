@@ -1,0 +1,225 @@
+#!/usr/bin/env python3
+"""
+Loop wrapper for single-item processing commands.
+Reads items from stdin and calls the wrapped command for each item.
+Handles errors gracefully and passes successful outputs downstream.
+"""
+import sys
+import subprocess
+import os
+import shutil
+import signal
+
+# Maximum stderr size to log (to prevent memory issues)
+MAX_STDERR_LOG = 2000  # characters
+
+def log(msg):
+    """Log to stderr with script name prefix, handling all errors"""
+    try:
+        print(f"loop: {msg}", file=sys.stderr)
+        sys.stderr.flush()
+    except (BrokenPipeError, OSError):
+        # stderr is closed or broken, give up on logging
+        pass
+    except Exception:
+        # Any other error, silently ignore
+        pass
+
+def safe_print(msg):
+    """Print to stdout, handling broken pipe errors gracefully"""
+    try:
+        print(msg)
+        sys.stdout.flush()
+    except BrokenPipeError:
+        # Downstream process closed, exit gracefully
+        try:
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(devnull, sys.stdout.fileno())
+        except:
+            pass
+        sys.exit(0)
+    except OSError as e:
+        # Other I/O errors
+        log(f"Error writing to stdout: {e}")
+        sys.exit(1)
+    except Exception as e:
+        log(f"Unexpected error writing to stdout: {e}")
+        sys.exit(1)
+
+def validate_command(command):
+    """Check if command exists and is executable"""
+    cmd_path = command[0]
+    
+    # If it's a path (contains /), check directly
+    if '/' in cmd_path:
+        if os.path.isfile(cmd_path) and os.access(cmd_path, os.X_OK):
+            return True
+        else:
+            log(f"Command not found or not executable: {cmd_path}")
+            return False
+    
+    # Otherwise check if it's in PATH
+    if shutil.which(cmd_path):
+        return True
+    else:
+        log(f"Command not found in PATH: {cmd_path}")
+        return False
+
+def setup_signal_handlers():
+    """Setup signal handlers for graceful shutdown"""
+    def signal_handler(signum, frame):
+        log(f"Received signal {signum}, shutting down gracefully")
+        sys.exit(0)
+    
+    # Handle SIGTERM and SIGINT gracefully
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+
+def main():
+    if len(sys.argv) < 2:
+        log("Usage: loop <command> [args...]")
+        log("Reads items from stdin and calls <command> with each item")
+        sys.exit(1)
+    
+    # Command to execute (everything after 'loop')
+    command = sys.argv[1:]
+    
+    # Setup signal handlers
+    setup_signal_handlers()
+    
+    # Validate command exists before processing
+    if not validate_command(command):
+        sys.exit(1)
+    
+    consecutive_errors = 0
+    processed_count = 0
+    failed_count = 0
+    
+    try:
+        for line in sys.stdin:
+            item = line.strip()
+            
+            if not item:
+                continue
+            
+            try:
+                # Call the command with the item as an argument
+                result = subprocess.run(
+                    command + [item],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=300  # 5 minute timeout per item
+                )
+                
+                # Check if command succeeded
+                if result.returncode == 0:
+                    # If command produced output, pass it downstream
+                    output = result.stdout.strip() if result.stdout else ""
+                    if output:
+                        safe_print(output)
+                    
+                    consecutive_errors = 0
+                    processed_count += 1
+                else:
+                    consecutive_errors += 1
+                    failed_count += 1
+                    
+                    # Log stderr from failed command (truncated)
+                    if result.stderr:
+                        stderr_lines = result.stderr.strip().split('\n')
+                        for err_line in stderr_lines[:20]:  # Max 20 lines
+                            if err_line:
+                                # Truncate each line
+                                truncated = err_line[:MAX_STDERR_LOG]
+                                log(f"Command error: {truncated}")
+                    
+                    # If too many consecutive errors, exit
+                    if consecutive_errors >= 10:
+                        log("Too many consecutive errors, exiting")
+                        sys.exit(1)
+                    
+                    # Continue processing next item
+                    continue
+                    
+            except subprocess.TimeoutExpired as e:
+                consecutive_errors += 1
+                failed_count += 1
+                log(f"Command timeout for: {item[:100]}")  # Truncate item in log
+                
+                # Try to log partial stderr if available
+                if e.stderr:
+                    stderr_preview = e.stderr[:MAX_STDERR_LOG] if isinstance(e.stderr, str) else ""
+                    if stderr_preview:
+                        log(f"Partial stderr: {stderr_preview}")
+                
+                if consecutive_errors >= 10:
+                    log("Too many consecutive timeouts, exiting")
+                    sys.exit(1)
+                
+                continue
+            
+            except FileNotFoundError:
+                log(f"Command not found: {command[0]}")
+                sys.exit(1)
+            
+            except MemoryError:
+                log(f"Out of memory processing: {item[:100]}")
+                consecutive_errors += 1
+                failed_count += 1
+                if consecutive_errors >= 10:
+                    log("Too many memory errors, exiting")
+                    sys.exit(1)
+                continue
+            
+            except OSError as e:
+                consecutive_errors += 1
+                failed_count += 1
+                log(f"OS error processing {item[:100]}: {e}")
+                
+                if consecutive_errors >= 10:
+                    log("Too many OS errors, exiting")
+                    sys.exit(1)
+                
+                continue
+                
+            except Exception as e:
+                consecutive_errors += 1
+                failed_count += 1
+                log(f"Unexpected error processing {item[:100]}: {e}")
+                
+                if consecutive_errors >= 10:
+                    log("Too many consecutive errors, exiting")
+                    sys.exit(1)
+                
+                continue
+        
+        # Summary logging
+        total = processed_count + failed_count
+        if total > 0:
+            log(f"Summary: {processed_count} succeeded, {failed_count} failed")
+        
+        # If we processed at least one item successfully, exit with success
+        if processed_count > 0:
+            sys.exit(0)
+        else:
+            # No items processed - could be empty input or all failed
+            if processed_count == 0 and failed_count == 0:
+                # Empty input
+                sys.exit(0)
+            else:
+                sys.exit(1)
+            
+    except KeyboardInterrupt:
+        log("Interrupted by user")
+        sys.exit(0)
+    except BrokenPipeError:
+        # stdin closed
+        log("Input pipe closed")
+        sys.exit(0 if processed_count > 0 else 1)
+    except Exception as e:
+        log(f"Fatal error in loop: {e}")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
