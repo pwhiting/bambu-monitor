@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
 Extract Last Frame from Video
-Reads video paths from stdin or from command-line argument
-Outputs the image path to stdout on success
+Takes a video file path as argument, extracts the last frame.
+Outputs the image path to stdout on success.
+Use with 'loop' for processing multiple files.
 """
 import subprocess
 import os
 import sys
 import argparse
 
-# Minimum valid video size (1KB) - videos smaller than this are likely invalid
+# Minimum valid video size (1KB)
 MIN_VIDEO_SIZE = 1024
 
-# Minimum valid image size (1KB) - images smaller than this are likely invalid
+# Minimum valid image size (1KB)
 MIN_IMAGE_SIZE = 1024
 
 def log(msg):
@@ -21,21 +22,7 @@ def log(msg):
         print(f"{sys.argv[0]}: {msg}", file=sys.stderr)
         sys.stderr.flush()
     except:
-        pass  # Ignore errors writing to stderr
-
-def safe_print(msg):
-    """Print to stdout, handling broken pipe errors gracefully"""
-    try:
-        print(msg)
-        sys.stdout.flush()
-    except BrokenPipeError:
-        # Downstream process closed, exit gracefully
-        devnull = os.open(os.devnull, os.O_WRONLY)
-        os.dup2(devnull, sys.stdout.fileno())
-        sys.exit(0)
-    except Exception as e:
-        log(f"Error writing to stdout: {e}")
-        sys.exit(1)
+        pass
 
 def validate_video_file(video_path):
     """Check if video file exists and is large enough to process"""
@@ -70,8 +57,6 @@ def extract_last_frame(video_path, output_path):
         
         log(f"Extracting last frame from {os.path.basename(video_path)}")
         
-        # For short videos, decode fully and use -update to keep last frame
-        # This is more reliable than seeking
         result = subprocess.run(
             [
                 "ffmpeg",
@@ -81,7 +66,7 @@ def extract_last_frame(video_path, output_path):
                 "-i", video_path,
                 "-an",
                 "-f", "image2",
-                "-fps_mode", "passthrough",  # modern replacement for -vsync 0
+                "-fps_mode", "passthrough",
                 "-update", "1",
                 "-q:v", "2",
                 "-y",
@@ -93,15 +78,12 @@ def extract_last_frame(video_path, output_path):
             timeout=30
         )
         
-        # Check if extraction succeeded
         if result.returncode != 0:
             log(f"ffmpeg failed (exit code {result.returncode})")
             if result.stderr:
-                # Log first 200 chars of error
                 log(f"ffmpeg error: {result.stderr[:200]}")
             return False
         
-        # Validate output file
         if not os.path.exists(temp_output):
             log(f"Extraction failed: output file not created")
             return False
@@ -117,7 +99,6 @@ def extract_last_frame(video_path, output_path):
         
         # Move to final location
         try:
-            # Remove existing output if present
             if os.path.exists(output_path):
                 os.remove(output_path)
             os.rename(temp_output, output_path)
@@ -137,7 +118,6 @@ def extract_last_frame(video_path, output_path):
         log(f"Unexpected error: {e}")
         return False
     finally:
-        # Clean up temp file if it still exists
         if temp_output and os.path.exists(temp_output):
             try:
                 os.remove(temp_output)
@@ -145,23 +125,21 @@ def extract_last_frame(video_path, output_path):
                 pass
 
 def main():
-    """Main function"""
-    parser = argparse.ArgumentParser(description="Extract last frame from video files")
+    parser = argparse.ArgumentParser(description="Extract last frame from video file")
     parser.add_argument(
         "video",
-        nargs="?",
-        help="Video file path (if not provided, reads from stdin)",
+        help="Video file path"
     )
     parser.add_argument(
         "output",
         nargs="?",
         default="snapshot.jpg",
-        help="Output filename (default: snapshot.jpg)",
+        help="Output filename (default: snapshot.jpg)"
     )
     args = parser.parse_args()
     
     try:
-        # Convert to absolute path to ensure we output the correct path
+        # Convert to absolute path
         output_path = os.path.abspath(args.output)
         
         # Make sure output directory exists
@@ -173,63 +151,17 @@ def main():
                 log(f"Error creating output directory: {e}")
                 sys.exit(1)
         
-        # Process single file from command line or read from stdin
-        if args.video:
-            # Single file from command line
-            video_path = args.video
-            
-            if extract_last_frame(video_path, output_path):
-                safe_print(output_path)
-                sys.exit(0)
-            else:
-                sys.exit(1)
+        # Process the file
+        if extract_last_frame(args.video, output_path):
+            print(output_path)
+            sys.stdout.flush()
+            sys.exit(0)
         else:
-            # Read video paths from stdin
-            consecutive_errors = 0
-            processed_count = 0
-            
-            for line in sys.stdin:
-                video_path = line.strip()
-                
-                if not video_path:
-                    continue
-                
-                try:
-                    if extract_last_frame(video_path, output_path):
-                        safe_print(output_path)
-                        consecutive_errors = 0
-                        processed_count += 1
-                    else:
-                        consecutive_errors += 1
-                        log(f"Failed to process {video_path}")
-                        
-                        # If too many consecutive errors, exit
-                        if consecutive_errors >= 10:
-                            log("Too many consecutive errors, exiting")
-                            sys.exit(1)
-                        
-                        # Continue processing next file
-                        continue
-                        
-                except Exception as e:
-                    consecutive_errors += 1
-                    log(f"Error processing {video_path}: {e}")
-                    
-                    if consecutive_errors >= 10:
-                        log("Too many consecutive errors, exiting")
-                        sys.exit(1)
-                    
-                    continue
-            
-            # If we processed at least one file successfully, exit with success
-            if processed_count > 0:
-                sys.exit(0)
-            else:
-                sys.exit(1)
+            sys.exit(1)
                 
     except KeyboardInterrupt:
         log("Stopped by user")
-        sys.exit(0)
+        sys.exit(1)
     except Exception as e:
         log(f"Fatal error: {e}")
         sys.exit(1)

@@ -2,7 +2,9 @@
 """
 Check if a Bambu P1S 3D print image shows a failing print.
 Uses OpenAI's vision API for cost-efficient analysis.
-Reads image paths from stdin or from command-line argument.
+Takes an image path as argument.
+Outputs the image path to stdout only if failure detected.
+Use with 'loop' for processing multiple images.
 """
 import sys
 import base64
@@ -15,13 +17,13 @@ from openai import APIError, APIConnectionError, RateLimitError, APITimeoutError
 # Minimum valid image size (1KB)
 MIN_IMAGE_SIZE = 1024
 
-# Maximum image size to send to API (20MB)
+# Maximum image size (20MB)
 MAX_IMAGE_SIZE = 20 * 1024 * 1024
 
 # Retry configuration
 MAX_RETRIES = 3
-RETRY_DELAY = 2  # seconds
-RATE_LIMIT_DELAY = 60  # seconds to wait on rate limit
+RETRY_DELAY = 2
+RATE_LIMIT_DELAY = 60
 
 def log(msg):
     """Log to stderr with script name prefix"""
@@ -29,21 +31,7 @@ def log(msg):
         print(f"{sys.argv[0]}: {msg}", file=sys.stderr)
         sys.stderr.flush()
     except:
-        pass  # Ignore errors writing to stderr
-
-def safe_print(msg):
-    """Print to stdout, handling broken pipe errors gracefully"""
-    try:
-        print(msg)
-        sys.stdout.flush()
-    except BrokenPipeError:
-        # Downstream process closed, exit gracefully
-        devnull = os.open(os.devnull, os.O_WRONLY)
-        os.dup2(devnull, sys.stdout.fileno())
-        sys.exit(0)
-    except Exception as e:
-        log(f"Error writing to stdout: {e}")
-        sys.exit(1)
+        pass
 
 def validate_image(image_path):
     """Check if image file is valid for processing"""
@@ -59,23 +47,22 @@ def validate_image(image_path):
         file_size = os.path.getsize(image_path)
         
         if file_size < MIN_IMAGE_SIZE:
-            log(f"Image too small ({file_size} bytes): {image_path}")
+            log(f"Image too small ({file_size} bytes)")
             return False
         
         if file_size > MAX_IMAGE_SIZE:
-            log(f"Image too large ({file_size} bytes, max {MAX_IMAGE_SIZE}): {image_path}")
+            log(f"Image too large ({file_size} bytes, max {MAX_IMAGE_SIZE})")
             return False
         
-        # Check if file is readable
         if not os.access(image_path, os.R_OK):
-            log(f"File not readable: {image_path}")
+            log(f"File not readable")
             return False
         
         # Validate file extension
         valid_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp']
         ext = os.path.splitext(image_path)[1].lower()
         if ext not in valid_extensions:
-            log(f"Invalid image extension '{ext}' (expected one of: {', '.join(valid_extensions)})")
+            log(f"Invalid image extension '{ext}'")
             return False
         
         return True
@@ -93,7 +80,7 @@ def encode_image(image_path):
         return None
 
 def check_print_with_retry(client, model, image_path, max_retries=MAX_RETRIES):
-    """Check if the print is failing using the specified model with retry logic."""
+    """Check if the print is failing with retry logic."""
     
     for attempt in range(1, max_retries + 1):
         try:
@@ -128,27 +115,26 @@ def check_print_with_retry(client, model, image_path, max_retries=MAX_RETRIES):
             
         except RateLimitError as e:
             if attempt < max_retries:
-                log(f"Rate limit hit (attempt {attempt}/{max_retries}), waiting {RATE_LIMIT_DELAY}s...")
+                log(f"Rate limit (attempt {attempt}/{max_retries}), waiting {RATE_LIMIT_DELAY}s...")
                 time.sleep(RATE_LIMIT_DELAY)
                 continue
-            return None, f"Rate limit exceeded: {str(e)}"
+            return None, f"Rate limit exceeded"
         
         except APITimeoutError as e:
             if attempt < max_retries:
                 log(f"API timeout (attempt {attempt}/{max_retries}), retrying...")
                 time.sleep(RETRY_DELAY)
                 continue
-            return None, f"API timeout: {str(e)}"
+            return None, f"API timeout"
         
         except APIConnectionError as e:
             if attempt < max_retries:
                 log(f"Connection error (attempt {attempt}/{max_retries}), retrying...")
                 time.sleep(RETRY_DELAY)
                 continue
-            return None, f"Connection error: {str(e)}"
+            return None, f"Connection error"
         
         except APIError as e:
-            # Don't retry on general API errors (usually auth or invalid request)
             return None, f"API error: {str(e)}"
         
         except Exception as e:
@@ -156,38 +142,13 @@ def check_print_with_retry(client, model, image_path, max_retries=MAX_RETRIES):
     
     return None, "Max retries exceeded"
 
-def check_print(client, model, image_path):
-    """Check if the print is failing using the specified model."""
-    try:
-        # Validate image first
-        if not validate_image(image_path):
-            return None
-        
-        log(f"Checking {os.path.basename(image_path)} with {model}")
-        
-        result, error = check_print_with_retry(client, model, image_path)
-        
-        if error:
-            log(f"Check failed: {error}")
-            return None
-        
-        # Always print model output to stderr
-        log(f"Model response: {result}")
-        
-        return result
-        
-    except Exception as e:
-        log(f"Error: {e}")
-        return None
-
 def main():
     parser = argparse.ArgumentParser(
-        description="Check if a 3D print image shows a failing print using OpenAI vision models"
+        description="Check if a 3D print image shows a failing print"
     )
     parser.add_argument(
         "image",
-        nargs="?",
-        help="Path to the image file (if not provided, reads from stdin)",
+        help="Path to the image file"
     )
     parser.add_argument(
         "-m", "--model",
@@ -198,7 +159,7 @@ def main():
     args = parser.parse_args()
     
     try:
-        # Get API key from environment
+        # Get API key
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             log("Error: OPENAI_API_KEY environment variable not set")
@@ -211,80 +172,33 @@ def main():
             log(f"Error initializing OpenAI client: {e}")
             sys.exit(1)
         
-        # Process single file from command line or read from stdin
-        if args.image:
-            # Single file from command line
-            image_path = args.image
-            
-            result = check_print(client, args.model, image_path)
-            if result and "yes" in result.lower():
-                # Print filename to stdout for downstream processing
-                safe_print(image_path)
-                sys.exit(0)
-            elif result:
-                # Model said no - success but don't output
-                sys.exit(0)
-            else:
-                # Error occurred
-                sys.exit(1)
+        # Validate image
+        if not validate_image(args.image):
+            sys.exit(1)
+        
+        log(f"Checking {os.path.basename(args.image)} with {args.model}")
+        
+        result, error = check_print_with_retry(client, args.model, args.image)
+        
+        if error:
+            log(f"Check failed: {error}")
+            sys.exit(1)
+        
+        # Log model response
+        log(f"Model response: {result}")
+        
+        # Only output if failure detected
+        if result and "yes" in result.lower():
+            print(args.image)
+            sys.stdout.flush()
+            sys.exit(0)
         else:
-            # Read image paths from stdin
-            consecutive_errors = 0
-            processed_count = 0
-            failure_count = 0
+            # Model said no - success but don't output
+            sys.exit(0)
             
-            for line in sys.stdin:
-                image_path = line.strip()
-                
-                if not image_path:
-                    continue
-                
-                try:
-                    result = check_print(client, args.model, image_path)
-                    
-                    if result:
-                        processed_count += 1
-                        consecutive_errors = 0
-                        
-                        if "yes" in result.lower():
-                            # Print filename to stdout for downstream processing
-                            safe_print(image_path)
-                            failure_count += 1
-                    else:
-                        consecutive_errors += 1
-                        log(f"Failed to check {image_path}")
-                        
-                        # If too many consecutive errors, exit
-                        if consecutive_errors >= 10:
-                            log("Too many consecutive errors, exiting")
-                            sys.exit(1)
-                        
-                        # Continue processing next file
-                        continue
-                        
-                except Exception as e:
-                    consecutive_errors += 1
-                    log(f"Error processing {image_path}: {e}")
-                    
-                    if consecutive_errors >= 10:
-                        log("Too many consecutive errors, exiting")
-                        sys.exit(1)
-                    
-                    continue
-            
-            # Summary logging
-            if processed_count > 0:
-                log(f"Processed {processed_count} images, {failure_count} failures detected")
-            
-            # If we processed at least one file successfully, exit with success
-            if processed_count > 0:
-                sys.exit(0)
-            else:
-                sys.exit(1)
-                
     except KeyboardInterrupt:
         log("Stopped by user")
-        sys.exit(0)
+        sys.exit(1)
     except Exception as e:
         log(f"Fatal error: {e}")
         sys.exit(1)
