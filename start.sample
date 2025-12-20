@@ -2,8 +2,9 @@
 
 export OPENAI_API_KEY=sk-proj-7h...
 export PUSHCUT_WEBHOOK_SECRET=uzJ...
+export PYTHONUNBUFFERED=1
 
 cd ~/bambu-monitor
 PATH=$PATH:~/bambu-monitor
 
-./last_avi | ./loop ./last_image | ./loop ./scp_image user@site.com:/directory/snapshot.jpg | ./loop ./check | ./loop ./notify Bambu
+last_avi | loop last_image | loop scp_image {} user@site.com:/directory/snapshot.jpg | loop check | loop notify Bambu
