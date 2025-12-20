@@ -55,7 +55,8 @@ def extract_last_frame(video_path, output_path):
         output_base = os.path.basename(output_path)
         temp_output = os.path.join(output_dir, f".tmp_{output_base}")
         
-        log(f"Extracting last frame from {os.path.basename(video_path)}")
+        log(f"Processing video: {video_path}")
+        log(f"Extracting last frame → {output_path}")
         
         result = subprocess.run(
             [
@@ -102,7 +103,8 @@ def extract_last_frame(video_path, output_path):
             if os.path.exists(output_path):
                 os.remove(output_path)
             os.rename(temp_output, output_path)
-            log(f"Extracted frame ({file_size:,} bytes) to {output_path}")
+            log(f"✓ Extracted last frame ({file_size:,} bytes)")
+            log(f"✓ Saved to: {output_path}")
             return True
         except Exception as e:
             log(f"Error moving output file: {e}")
@@ -140,6 +142,9 @@ def main():
     try:
         # Convert to absolute path
         output_path = os.path.abspath(args.output)
+        
+        log(f"Input: {args.video}")
+        log(f"Output: {output_path}")
         
         # Make sure output directory exists
         output_dir = os.path.dirname(output_path)
