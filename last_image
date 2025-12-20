@@ -9,6 +9,7 @@ import subprocess
 import os
 import sys
 import argparse
+import time
 
 # Minimum valid video size (1KB)
 MIN_VIDEO_SIZE = 1024
@@ -23,6 +24,64 @@ def log(msg):
         sys.stderr.flush()
     except:
         pass
+
+def get_frame_count(video_path):
+    """Get total number of frames in video using ffprobe"""
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v", "error",
+                "-select_streams", "v:0",
+                "-count_frames",
+                "-show_entries", "stream=nb_read_frames",
+                "-of", "default=nokey=1:noprint_wrappers=1",
+                video_path
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10
+        )
+        
+        if result.returncode == 0 and result.stdout.strip():
+            frame_count = int(result.stdout.strip())
+            log(f"Total frames in video: {frame_count}")
+            return frame_count
+        else:
+            log("Could not determine frame count")
+            return None
+            
+    except (subprocess.TimeoutExpired, ValueError, FileNotFoundError) as e:
+        log(f"Error getting frame count: {e}")
+        return None
+
+def build_output_filename(video_path, output_dir, frame_number=None):
+    """Build output filename from video filename"""
+    # Get basename without path
+    basename = os.path.basename(video_path)
+    
+    # Remove extension
+    name, _ = os.path.splitext(basename)
+    
+    # Replace "video" with "image"
+    name = name.replace("video", "image")
+    
+    # Add frame number or timestamp
+    if frame_number is not None:
+        name = f"{name}_f{frame_number}"
+    else:
+        # Use seconds since epoch
+        timestamp = int(time.time())
+        name = f"{name}_s{timestamp}"
+    
+    # Add .jpg extension
+    filename = f"{name}.jpg"
+    
+    # Build full path
+    output_path = os.path.join(output_dir, filename)
+    
+    return output_path
 
 def validate_video_file(video_path):
     """Check if video file exists and is large enough to process"""
@@ -133,24 +192,28 @@ def main():
         help="Video file path"
     )
     parser.add_argument(
-        "--output", "-o",
-        default="./bambu_images/latest.jpg",
-        help="Output filename (default: ./bambu_images/latest.jpg)"
+        "--path", "-p",
+        default="./bambu_images",
+        help="Output directory path (default: ./bambu_images)"
     )
     args = parser.parse_args()
     
     try:
-        # Convert to absolute path
-        output_path = os.path.abspath(args.output)
+        # Get frame count from video
+        frame_count = get_frame_count(args.video)
+        
+        # Build output filename from input video name
+        output_dir = os.path.abspath(args.path)
+        output_path = build_output_filename(args.video, output_dir, frame_count)
         
         log(f"Input: {args.video}")
         log(f"Output: {output_path}")
         
         # Make sure output directory exists
-        output_dir = os.path.dirname(output_path)
-        if output_dir and not os.path.exists(output_dir):
+        if not os.path.exists(output_dir):
             try:
                 os.makedirs(output_dir)
+                log(f"Created directory: {output_dir}")
             except Exception as e:
                 log(f"Error creating output directory: {e}")
                 sys.exit(1)
