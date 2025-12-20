@@ -11,9 +11,6 @@ import os
 import shutil
 import signal
 
-# Maximum stderr size to log (to prevent memory issues)
-MAX_STDERR_LOG = 2000  # characters
-
 def log(msg):
     """Log to stderr with script name prefix, handling all errors"""
     try:
@@ -110,11 +107,25 @@ def main():
     failed_count = 0
     
     try:
-        for line in sys.stdin:
-            item = line.strip()
-            
-            if not item:
-                continue
+        while True:
+            try:
+                line = sys.stdin.readline()
+                if not line:  # EOF
+                    break
+                
+                item = line.strip()
+                
+                if not item:
+                    continue
+                
+                # Debug: Log when we receive an item (only if DEBUG env var is set)
+                if os.getenv('DEBUG'):
+                    log(f"Received: {item[:100]}")
+            except KeyboardInterrupt:
+                raise
+            except Exception as e:
+                log(f"Error reading from stdin: {e}")
+                break
             
             try:
                 # Build the command with item substitution
@@ -124,7 +135,7 @@ def main():
                 result = subprocess.run(
                     cmd,
                     stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
+                    stderr=None,  # Let stderr pass through to user
                     text=True,
                     timeout=300  # 5 minute timeout per item
                 )
@@ -142,14 +153,8 @@ def main():
                     consecutive_errors += 1
                     failed_count += 1
                     
-                    # Log stderr from failed command (truncated)
-                    if result.stderr:
-                        stderr_lines = result.stderr.strip().split('\n')
-                        for err_line in stderr_lines[:20]:  # Max 20 lines
-                            if err_line:
-                                # Truncate each line
-                                truncated = err_line[:MAX_STDERR_LOG]
-                                log(f"Command error: {truncated}")
+                    # Stderr already passed through, just log the failure
+                    log(f"Command failed with exit code {result.returncode}")
                     
                     # If too many consecutive errors, exit
                     if consecutive_errors >= 10:
@@ -163,12 +168,6 @@ def main():
                 consecutive_errors += 1
                 failed_count += 1
                 log(f"Command timeout for: {item[:100]}")  # Truncate item in log
-                
-                # Try to log partial stderr if available
-                if e.stderr:
-                    stderr_preview = e.stderr[:MAX_STDERR_LOG] if isinstance(e.stderr, str) else ""
-                    if stderr_preview:
-                        log(f"Partial stderr: {stderr_preview}")
                 
                 if consecutive_errors >= 10:
                     log("Too many consecutive timeouts, exiting")
