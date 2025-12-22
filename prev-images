@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+"""
+Find previous images in a sequence based on filename pattern.
+
+For files ending in _f<number>.jpg, finds the previous n images in the same directory
+with the same base name but lower frame numbers.
+"""
+
+import argparse
+import os
+import re
+import sys
+from pathlib import Path
+
+
+def parse_args():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description='Find previous images in a sequence'
+    )
+    parser.add_argument(
+        '-n',
+        type=int,
+        default=2,
+        help='Total number of images to return (default: 2, minimum: 1)'
+    )
+    parser.add_argument(
+        'image_file',
+        help='Path to the image file'
+    )
+    return parser.parse_args()
+
+
+def get_previous_images(image_path, count):
+    """
+    Find the previous images in the sequence.
+
+    Args:
+        image_path: Path to the current image file
+        count: Total number of images to return (including current)
+
+    Returns:
+        List of image paths including the current one and previous ones (oldest to newest)
+    """
+    image_path = Path(image_path)
+    filename = image_path.name
+
+    # If count is 1, just return the current image (no-op)
+    if count == 1:
+        return [str(image_path)]
+
+    # Check if filename matches the pattern _f<number>.jpg
+    match = re.match(r'^(.+)_f(\d+)\.jpg$', filename)
+
+    if not match:
+        # Doesn't match pattern, just return the filename
+        return [str(image_path)]
+
+    base_name = match.group(1)
+    current_frame = int(match.group(2))
+
+    # Find all files in the same directory with the same base name
+    directory = image_path.parent
+    pattern = re.compile(rf'^{re.escape(base_name)}_f(\d+)\.jpg$')
+
+    matching_files = []
+    for file in directory.iterdir():
+        if file.is_file():
+            file_match = pattern.match(file.name)
+            if file_match:
+                frame_num = int(file_match.group(1))
+                if frame_num <= current_frame:
+                    matching_files.append((frame_num, file))
+
+    # Sort by frame number in descending order to find previous images
+    matching_files.sort(key=lambda x: x[0], reverse=True)
+
+    # Take the requested count of images
+    selected_files = matching_files[:count]
+
+    # Reverse to get oldest to newest order
+    selected_files.reverse()
+
+    result = [str(f[1]) for f in selected_files]
+
+    return result
+
+
+def main():
+    """Main entry point."""
+    args = parse_args()
+
+    if not os.path.exists(args.image_file):
+        print(f"Error: File not found: {args.image_file}", file=sys.stderr)
+        sys.exit(1)
+
+    previous_images = get_previous_images(args.image_file, args.n)
+
+    # Output as comma-separated list
+    print(','.join(previous_images))
+
+
+if __name__ == '__main__':
+    main()

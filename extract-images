@@ -1,0 +1,276 @@
+#!/usr/bin/env python3
+"""
+Extract Multiple Frames from Video
+Takes a video file path and extracts the last n frames with optional step.
+Outputs the image paths to stdout on success (comma-separated).
+Use with 'check' for processing multiple frames.
+"""
+import subprocess
+import os
+import sys
+import argparse
+import time
+
+# Minimum valid video size (1KB)
+MIN_VIDEO_SIZE = 1024
+
+# Minimum valid image size (1KB)
+MIN_IMAGE_SIZE = 1024
+
+def log(msg):
+    """Log to stderr with script name prefix"""
+    try:
+        print(f"{sys.argv[0]}: {msg}", file=sys.stderr)
+        sys.stderr.flush()
+    except:
+        pass
+
+def get_frame_count(video_path):
+    """Get total number of frames in video using ffprobe"""
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v", "error",
+                "-select_streams", "v:0",
+                "-count_frames",
+                "-show_entries", "stream=nb_read_frames",
+                "-of", "default=nokey=1:noprint_wrappers=1",
+                video_path
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10
+        )
+
+        if result.returncode == 0 and result.stdout.strip():
+            frame_count = int(result.stdout.strip())
+            log(f"Total frames in video: {frame_count}")
+            return frame_count
+        else:
+            log("Could not determine frame count")
+            return None
+
+    except (subprocess.TimeoutExpired, ValueError, FileNotFoundError) as e:
+        log(f"Error getting frame count: {e}")
+        return None
+
+def build_output_filename(video_path, output_dir, frame_number):
+    """Build output filename from video filename"""
+    # Get basename without path
+    basename = os.path.basename(video_path)
+
+    # Remove extension
+    name, _ = os.path.splitext(basename)
+
+    # Replace "video" with "image"
+    name = name.replace("video", "image")
+
+    # Add frame number
+    name = f"{name}_f{frame_number}"
+
+    # Add .jpg extension
+    filename = f"{name}.jpg"
+
+    # Build full path
+    output_path = os.path.join(output_dir, filename)
+
+    return output_path
+
+def validate_video_file(video_path):
+    """Check if video file exists and is large enough to process"""
+    try:
+        if not os.path.exists(video_path):
+            log(f"File not found: {video_path}")
+            return False
+
+        file_size = os.path.getsize(video_path)
+        if file_size < MIN_VIDEO_SIZE:
+            log(f"File too small ({file_size} bytes): {video_path}")
+            return False
+
+        return True
+    except Exception as e:
+        log(f"Error validating video file: {e}")
+        return False
+
+def extract_frame(video_path, frame_number, output_path):
+    """Extract a specific frame from the video"""
+    temp_output = None
+
+    try:
+        # Create temp output path
+        output_dir = os.path.dirname(output_path) or '.'
+        output_base = os.path.basename(output_path)
+        temp_output = os.path.join(output_dir, f".tmp_{output_base}")
+
+        log(f"Extracting frame {frame_number} → {output_path}")
+
+        # Use select filter to extract specific frame
+        result = subprocess.run(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel", "error",
+                "-i", video_path,
+                "-vf", f"select='eq(n\\,{frame_number})'",
+                "-vframes", "1",
+                "-q:v", "2",
+                "-y",
+                temp_output,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=30
+        )
+
+        if result.returncode != 0:
+            log(f"ffmpeg failed (exit code {result.returncode})")
+            if result.stderr:
+                log(f"ffmpeg error: {result.stderr[:200]}")
+            return False
+
+        if not os.path.exists(temp_output):
+            log(f"Extraction failed: output file not created")
+            return False
+
+        file_size = os.path.getsize(temp_output)
+        if file_size < MIN_IMAGE_SIZE:
+            log(f"Extraction failed: output too small ({file_size} bytes)")
+            try:
+                os.remove(temp_output)
+            except:
+                pass
+            return False
+
+        # Move to final location
+        try:
+            if os.path.exists(output_path):
+                os.remove(output_path)
+            os.rename(temp_output, output_path)
+            log(f"✓ Extracted frame {frame_number} ({file_size:,} bytes)")
+            return True
+        except Exception as e:
+            log(f"Error moving output file: {e}")
+            return False
+
+    except subprocess.TimeoutExpired:
+        log(f"ffmpeg timeout for frame {frame_number}")
+        return False
+    except FileNotFoundError:
+        log("ffmpeg not found - please install ffmpeg")
+        return False
+    except Exception as e:
+        log(f"Unexpected error: {e}")
+        return False
+    finally:
+        if temp_output and os.path.exists(temp_output):
+            try:
+                os.remove(temp_output)
+            except:
+                pass
+
+def main():
+    parser = argparse.ArgumentParser(description="Extract multiple frames from video file")
+    parser.add_argument(
+        "video",
+        help="Video file path"
+    )
+    parser.add_argument(
+        "-n",
+        type=int,
+        default=1,
+        help="Number of frames to extract (default: 1)"
+    )
+    parser.add_argument(
+        "-s", "--step",
+        type=int,
+        default=1,
+        help="Step size between frames (default: 1)"
+    )
+    parser.add_argument(
+        "--path", "-p",
+        default="./bambu_images",
+        help="Output directory path (default: ./bambu_images)"
+    )
+    args = parser.parse_args()
+
+    try:
+        # Validate input file
+        if not validate_video_file(args.video):
+            sys.exit(1)
+
+        # Get frame count from video
+        frame_count = get_frame_count(args.video)
+
+        if frame_count is None:
+            log("Cannot extract frames without knowing frame count")
+            sys.exit(1)
+
+        # Calculate which frames to extract
+        # We want the last n frames with step s
+        # For n=4, s=2, total=20: frames 14, 16, 18, 20 (0-indexed: 13, 15, 17, 19)
+        # Last frame is frame_count - 1
+        # Working backwards: last, last-step, last-2*step, ...
+
+        frames_to_extract = []
+        last_frame = frame_count - 1
+
+        for i in range(args.n):
+            frame_num = last_frame - (i * args.step)
+            if frame_num >= 0:
+                frames_to_extract.append(frame_num)
+            else:
+                break
+
+        # Reverse to get oldest to newest
+        frames_to_extract.reverse()
+
+        if not frames_to_extract:
+            log("No valid frames to extract")
+            sys.exit(1)
+
+        log(f"Input: {args.video}")
+        log(f"Extracting {len(frames_to_extract)} frame(s): {frames_to_extract}")
+
+        # Make sure output directory exists
+        output_dir = os.path.abspath(args.path)
+        if not os.path.exists(output_dir):
+            try:
+                os.makedirs(output_dir)
+                log(f"Created directory: {output_dir}")
+            except Exception as e:
+                log(f"Error creating output directory: {e}")
+                sys.exit(1)
+
+        # Extract all frames
+        output_paths = []
+        for frame_num in frames_to_extract:
+            output_path = build_output_filename(args.video, output_dir, frame_num)
+
+            if extract_frame(args.video, frame_num, output_path):
+                output_paths.append(output_path)
+            else:
+                log(f"Failed to extract frame {frame_num}")
+                sys.exit(1)
+
+        # Output all paths as comma-separated list
+        if output_paths:
+            print(','.join(output_paths))
+            sys.stdout.flush()
+            sys.exit(0)
+        else:
+            log("No frames were extracted")
+            sys.exit(1)
+
+    except KeyboardInterrupt:
+        log("Stopped by user")
+        sys.exit(1)
+    except Exception as e:
+        log(f"Fatal error: {e}")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()

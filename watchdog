@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+"""
+Watchdog timer that monitors stdin activity.
+Passes through all stdin to stdout, but executes a command if no activity for timeout period.
+Use to detect when upstream processes stop producing output.
+"""
+import sys
+import subprocess
+import argparse
+import signal
+import threading
+
+def log(msg):
+    """Log to stderr with script name prefix"""
+    try:
+        print(f"{sys.argv[0]}: {msg}", file=sys.stderr)
+        sys.stderr.flush()
+    except:
+        pass
+
+class WatchdogTimer:
+    """Timer that can be reset and executes a command on timeout"""
+
+    def __init__(self, timeout, command):
+        self.timeout = timeout
+        self.command = command
+        self.timer = None
+        self.running = True
+        self.lock = threading.Lock()
+        self.has_alerted = False
+
+    def reset(self):
+        """Reset the timer"""
+        with self.lock:
+            if self.timer:
+                self.timer.cancel()
+            if self.running:
+                # Reset the alert flag when we get new input
+                self.has_alerted = False
+                self.timer = threading.Timer(self.timeout, self._timeout_handler)
+                self.timer.daemon = True
+                self.timer.start()
+
+    def cancel(self):
+        """Cancel the timer"""
+        with self.lock:
+            self.running = False
+            if self.timer:
+                self.timer.cancel()
+                self.timer = None
+
+    def _timeout_handler(self):
+        """Execute command when timeout occurs"""
+        with self.lock:
+            # Only alert once until we get new input
+            if self.has_alerted:
+                return
+            self.has_alerted = True
+
+        log(f"Timeout after {self.timeout}s of inactivity")
+        log(f"Executing: {' '.join(self.command)}")
+
+        try:
+            result = subprocess.run(
+                self.command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=30
+            )
+
+            # Log all output from the command to stderr with prefix
+            if result.stdout:
+                for line in result.stdout.splitlines():
+                    log(f"[timeout-cmd] {line}")
+
+            if result.returncode == 0:
+                log("Timeout command executed successfully")
+            else:
+                log(f"Timeout command failed with exit code {result.returncode}")
+        except subprocess.TimeoutExpired as e:
+            log("Timeout command timed out")
+            if e.output:
+                for line in e.output.splitlines():
+                    log(f"[timeout-cmd] {line}")
+        except Exception as e:
+            log(f"Error executing timeout command: {e}")
+
+        # Don't reset timer - only reset when new input arrives
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Monitor stdin and execute command on inactivity timeout"
+    )
+    parser.add_argument(
+        "-t", "--timeout",
+        type=int,
+        default=900,
+        help="Timeout in seconds (default: 900 = 15 minutes)"
+    )
+    parser.add_argument(
+        "command",
+        nargs="+",
+        help="Command to execute on timeout"
+    )
+
+    args = parser.parse_args()
+
+    log(f"Starting watchdog with {args.timeout}s timeout")
+    log(f"Timeout command: {' '.join(args.command)}")
+
+    # Create and start watchdog timer
+    watchdog = WatchdogTimer(args.timeout, args.command)
+    watchdog.reset()
+
+    # Set up signal handler for clean shutdown
+    def signal_handler(signum, frame):
+        log("Shutting down...")
+        watchdog.cancel()
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    try:
+        # Read from stdin line by line
+        while True:
+            line = sys.stdin.readline()
+
+            if not line:
+                # EOF reached
+                log("EOF on stdin, exiting")
+                break
+
+            # Reset timer on any activity
+            watchdog.reset()
+
+            # Pass through to stdout
+            print(line, end='')
+            sys.stdout.flush()
+
+        watchdog.cancel()
+        sys.exit(0)
+
+    except KeyboardInterrupt:
+        log("Stopped by user")
+        watchdog.cancel()
+        sys.exit(1)
+    except Exception as e:
+        log(f"Fatal error: {e}")
+        watchdog.cancel()
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()

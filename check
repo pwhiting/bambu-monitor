@@ -2,8 +2,8 @@
 """
 Check if a Bambu P1S 3D print image shows a failing print.
 Uses OpenAI's vision API for cost-efficient analysis.
-Takes an image path as argument.
-Outputs the image path to stdout only if failure detected.
+Takes one or more image paths as arguments (comma-delimited or separate args).
+Outputs the first image path to stdout only if failure detected.
 Use with 'loop' for processing multiple images.
 """
 import sys
@@ -79,32 +79,44 @@ def encode_image(image_path):
         log(f"Error encoding image: {e}")
         return None
 
-def check_print_with_retry(client, model, image_path, max_retries=MAX_RETRIES):
+def check_print_with_retry(client, model, image_paths, max_retries=MAX_RETRIES):
     """Check if the print is failing with retry logic."""
-    
+
     for attempt in range(1, max_retries + 1):
         try:
-            base64_image = encode_image(image_path)
-            if not base64_image:
-                return None, "Failed to encode image"
-            
+            # Encode all images
+            content = []
+
+            # Add prompt text
+            if len(image_paths) > 1:
+                prompt_text = "Reply just yes or no. If there are multiple images assume the images are ordered by oldest image first. Look at the sequence of images for signs of print failure. Things to watch for include plastic moving with the extruder (like a blob stuck to it) or plastic moving laterally between frames. The build plate will be dropping and the extruder will be in different locations, but the plastic on the build plate shouldn't move laterally between frames. Return 'no' if the print appears to just be starting. Be moderately sure before replying yes"
+            else:
+                prompt_text = "Reply just yes or no. Is this image from a Bambu P1S likely a failing print? Return 'no' if the print appears to just be starting. Be moderately sure before replying yes"
+
+            content.append({
+                "type": "text",
+                "text": prompt_text
+            })
+
+            # Add all images
+            for image_path in image_paths:
+                base64_image = encode_image(image_path)
+                if not base64_image:
+                    return None, f"Failed to encode image: {image_path}"
+
+                content.append({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/jpeg;base64,{base64_image}"
+                    }
+                })
+
             response = client.chat.completions.create(
                 model=model,
                 messages=[
                     {
                         "role": "user",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": "Reply just yes or no. Is this image from a Bambu P1S likely a failing print? Return 'no' if the print appears to just be starting. Be moderately sure before replying yes"
-                            },
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/jpeg;base64,{base64_image}"
-                                }
-                            }
-                        ]
+                        "content": content
                     }
                 ],
                 timeout=30.0
@@ -147,49 +159,67 @@ def main():
         description="Check if a 3D print image shows a failing print"
     )
     parser.add_argument(
-        "image",
-        help="Path to the image file"
+        "images",
+        nargs='+',
+        help="Path(s) to image file(s) - can be comma-delimited or separate arguments"
     )
     parser.add_argument(
         "-m", "--model",
         default="gpt-5.1",
         help="Model to use (default: gpt-5.1)"
     )
-    
+
     args = parser.parse_args()
-    
+
     try:
+        # Parse image paths - handle both comma-delimited and separate args
+        image_paths = []
+        for arg in args.images:
+            if ',' in arg:
+                # Split comma-delimited string
+                image_paths.extend([p.strip() for p in arg.split(',')])
+            else:
+                image_paths.append(arg)
+
+        if not image_paths:
+            log("Error: No image paths provided")
+            sys.exit(1)
+
         # Get API key
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             log("Error: OPENAI_API_KEY environment variable not set")
             sys.exit(1)
-        
+
         # Initialize OpenAI client
         try:
             client = OpenAI(api_key=api_key)
         except Exception as e:
             log(f"Error initializing OpenAI client: {e}")
             sys.exit(1)
-        
-        # Validate image
-        if not validate_image(args.image):
-            sys.exit(1)
-        
-        log(f"Checking {os.path.basename(args.image)} with {args.model}")
-        
-        result, error = check_print_with_retry(client, args.model, args.image)
-        
+
+        # Validate all images
+        for image_path in image_paths:
+            if not validate_image(image_path):
+                sys.exit(1)
+
+        if len(image_paths) > 1:
+            log(f"Checking {len(image_paths)} images with {args.model}")
+        else:
+            log(f"Checking {os.path.basename(image_paths[0])} with {args.model}")
+
+        result, error = check_print_with_retry(client, args.model, image_paths)
+
         if error:
             log(f"Check failed: {error}")
             sys.exit(1)
-        
+
         # Log model response
         log(f"Model response: {result}")
-        
-        # Only output if failure detected
+
+        # Only output if failure detected (output first image path)
         if result and "yes" in result.lower():
-            print(args.image)
+            print(image_paths[0])
             sys.stdout.flush()
             sys.exit(0)
         else:

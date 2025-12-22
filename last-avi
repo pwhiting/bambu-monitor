@@ -12,20 +12,16 @@ import re
 import time
 import argparse
 
-# Configuration
-CONFIG_FILE = ".bambu_config"
+# Configuration (hardcoded defaults)
 OUTPUT_DIR = "./bambu_videos"
 STATE_FILE = ".last_avi_state"
+FTP_PORT = 990
+FTP_USER = "bblp"
+TIMELAPSE_PATH = "/timelapse/"
+DEFAULT_UPDATE_INTERVAL = 300  # 5 minutes
 
 # Minimum valid video size (10KB) - videos smaller than this are likely incomplete
 MIN_VIDEO_SIZE = 10240
-
-# Hardcoded defaults (these will be prompted if not in config)
-DEFAULT_VALUES = {
-    'FTP_PORT': '990',
-    'FTP_USER': 'bblp',
-    'TIMELAPSE_PATH': '/timelapse/',
-}
 
 def log(msg):
     """Log to stderr with script name prefix"""
@@ -33,7 +29,7 @@ def log(msg):
         print(f"{sys.argv[0]}: {msg}", file=sys.stderr)
         sys.stderr.flush()
     except:
-        pass  # Ignore errors writing to stderr
+        pass
 
 def safe_print(msg):
     """Print to stdout, handling broken pipe errors gracefully"""
@@ -41,7 +37,6 @@ def safe_print(msg):
         print(msg)
         sys.stdout.flush()
     except BrokenPipeError:
-        # Downstream process closed, exit gracefully
         devnull = os.open(os.devnull, os.O_WRONLY)
         os.dup2(devnull, sys.stdout.fileno())
         sys.exit(0)
@@ -49,99 +44,28 @@ def safe_print(msg):
         log(f"Error writing to stdout: {e}")
         sys.exit(1)
 
-def load_config():
-    """Load configuration from file, or prompt and create if missing"""
-    config = {}
-    
-    if os.path.exists(CONFIG_FILE):
-        # Load existing config
-        try:
-            with open(CONFIG_FILE, 'r') as f:
-                for line in f:
-                    line = line.strip()
-                    if line and not line.startswith('#') and '=' in line:
-                        key, value = line.split('=', 1)
-                        # Remove quotes if present
-                        value = value.strip().strip('"').strip("'")
-                        config[key] = value
-            
-            log(f"Loaded config from {CONFIG_FILE}")
-        except Exception as e:
-            log(f"Error reading config file: {e}")
-    
-    # Check for required values and prompt if missing
-    required = ['PRINTER_HOST', 'ACCESS_CODE', 'UPDATE_INTERVAL']
-    missing = [k for k in required if k not in config]
-    
-    if missing:
-        if not config:
-            print(f"\n{CONFIG_FILE} not found. Let's set it up.\n", file=sys.stderr)
-        else:
-            print(f"\nConfig incomplete. Need: {', '.join(missing)}\n", file=sys.stderr)
-        
-        if 'PRINTER_HOST' not in config:
-            while True:
-                host = input("Printer hostname/IP: ").strip()
-                if host:
-                    config['PRINTER_HOST'] = host
-                    break
-                print("Hostname cannot be empty!", file=sys.stderr)
-        
-        if 'ACCESS_CODE' not in config:
-            while True:
-                code = input("Access code (8-digit from printer WiFi settings): ").strip()
-                if code:
-                    config['ACCESS_CODE'] = code
-                    break
-                print("Access code cannot be empty!", file=sys.stderr)
-        
-        if 'UPDATE_INTERVAL' not in config:
-            while True:
-                interval = input("Update interval in seconds (e.g., 300 for 5 minutes): ").strip()
-                if interval and interval.isdigit():
-                    config['UPDATE_INTERVAL'] = interval
-                    break
-                print("Please enter a valid number!", file=sys.stderr)
-        
-        # Add defaults for optional values
-        for key, default in DEFAULT_VALUES.items():
-            if key not in config:
-                config[key] = default
-        
-        # Save configuration
-        try:
-            with open(CONFIG_FILE, 'w') as f:
-                f.write("# Bambu Lab Printer Configuration\n")
-                f.write(f"PRINTER_HOST={config['PRINTER_HOST']}\n")
-                f.write(f"ACCESS_CODE={config['ACCESS_CODE']}\n")
-                f.write(f"\n# Update interval in seconds (e.g., 300 = 5 minutes)\n")
-                f.write(f"UPDATE_INTERVAL={config['UPDATE_INTERVAL']}\n")
-                f.write(f"\n# FTP Settings (defaults usually work)\n")
-                f.write(f"FTP_PORT={config.get('FTP_PORT', DEFAULT_VALUES['FTP_PORT'])}\n")
-                f.write(f"FTP_USER={config.get('FTP_USER', DEFAULT_VALUES['FTP_USER'])}\n")
-                f.write(f"TIMELAPSE_PATH={config.get('TIMELAPSE_PATH', DEFAULT_VALUES['TIMELAPSE_PATH'])}\n")
-            
-            # Set restrictive permissions
-            os.chmod(CONFIG_FILE, 0o600)
-            
-            log(f"Configuration saved to {CONFIG_FILE}")
-        except Exception as e:
-            log(f"Error saving config file: {e}")
-    
-    # Apply defaults for any missing optional values
-    for key, default in DEFAULT_VALUES.items():
-        if key not in config:
-            config[key] = default
-    
-    # Validate critical values
-    if not config.get('PRINTER_HOST'):
-        log("ERROR: PRINTER_HOST is empty in config file")
+def get_config():
+    """Get configuration from environment or command line"""
+    printer_host = os.getenv('BAMBU_PRINTER_IP')
+    access_code = os.getenv('BAMBU_ACCESS_CODE')
+
+    if not printer_host:
+        log("ERROR: BAMBU_PRINTER_IP environment variable not set")
+        log("Set it in your start script: export BAMBU_PRINTER_IP=192.168.x.x")
         sys.exit(1)
-    if not config.get('ACCESS_CODE'):
-        log("ERROR: ACCESS_CODE is empty in config file")
+
+    if not access_code:
+        log("ERROR: BAMBU_ACCESS_CODE environment variable not set")
+        log("Set it in your start script: export BAMBU_ACCESS_CODE=12345678")
         sys.exit(1)
-    
-    return config
+
+    return {
+        'PRINTER_HOST': printer_host,
+        'ACCESS_CODE': access_code,
+        'FTP_PORT': FTP_PORT,
+        'FTP_USER': FTP_USER,
+        'TIMELAPSE_PATH': TIMELAPSE_PATH
+    }
 
 def parse_timestamp_from_filename(filename):
     """Extract timestamp from filename for proper sorting"""
@@ -155,24 +79,24 @@ def list_timelapse_directory(config, debug=False):
     """List timelapse directory and get the most recent video with its size"""
     try:
         url = f"ftps://{config['PRINTER_HOST']}:{config['FTP_PORT']}{config['TIMELAPSE_PATH']}"
-        
+
         if debug:
             log(f"Connecting to: {url}")
             log(f"User: {config['FTP_USER']}")
-        
+
         result = subprocess.run(
             ['curl', '--ssl', '--insecure', '--user', f"{config['FTP_USER']}:{config['ACCESS_CODE']}", url],
             capture_output=True,
             text=True,
             timeout=30
         )
-        
+
         if result.returncode != 0:
             log(f"Failed to list directory (exit code {result.returncode})")
             if result.stderr:
                 log(f"Error: {result.stderr[:200]}")
             return None, None
-        
+
         # Parse and find all .avi files with sizes
         files = []
         for line in result.stdout.strip().split('\n'):
@@ -184,20 +108,19 @@ def list_timelapse_directory(config, debug=False):
                         filename = ' '.join(parts[8:])
                         timestamp = parse_timestamp_from_filename(filename)
                         files.append((timestamp, filename, size))
-                    except (ValueError, IndexError) as e:
-                        log(f"Error parsing line: {line[:100]}")
+                    except (ValueError, IndexError):
                         continue
-        
+
         if not files:
             log("No timelapse videos found")
             return None, None
-        
+
         # Sort by timestamp (most recent last)
         files.sort()
-        
+
         latest = files[-1]
         return latest[1], latest[2]  # filename, size
-        
+
     except subprocess.TimeoutExpired:
         log("Timeout listing directory")
         return None, None
@@ -233,12 +156,12 @@ def download_video(config, remote_filename):
     """Download the timelapse video"""
     try:
         os.makedirs(OUTPUT_DIR, exist_ok=True)
-        
+
         local_path = os.path.join(OUTPUT_DIR, remote_filename)
         url = f"ftps://{config['PRINTER_HOST']}:{config['FTP_PORT']}{config['TIMELAPSE_PATH']}{remote_filename}"
-        
+
         log(f"Downloading {remote_filename}...")
-        
+
         result = subprocess.run(
             [
                 'curl',
@@ -252,23 +175,21 @@ def download_video(config, remote_filename):
             stderr=subprocess.PIPE,
             timeout=300
         )
-        
+
         if result.returncode != 0:
             stderr_msg = result.stderr.decode() if result.stderr else "Unknown error"
             log(f"Download failed: {stderr_msg[:200]}")
-            # Clean up partial download
             if os.path.exists(local_path):
                 try:
                     os.remove(local_path)
                 except:
                     pass
             return None
-        
+
         if os.path.exists(local_path):
             file_size = os.path.getsize(local_path)
             log(f"Downloaded {file_size:,} bytes")
-            
-            # Validate file size
+
             if file_size < MIN_VIDEO_SIZE:
                 log(f"Warning: File is too small ({file_size} bytes), likely incomplete")
                 try:
@@ -276,15 +197,14 @@ def download_video(config, remote_filename):
                 except:
                     pass
                 return None
-            
+
             return local_path
-        
+
         log("Download completed but file not found")
         return None
-        
+
     except subprocess.TimeoutExpired:
         log("Download timeout")
-        # Clean up partial download
         local_path = os.path.join(OUTPUT_DIR, remote_filename)
         if os.path.exists(local_path):
             try:
@@ -299,36 +219,30 @@ def download_video(config, remote_filename):
 def check_and_download(config, debug=False):
     """Check for new video and download if changed"""
     try:
-        # Find latest video
         latest_video, latest_size = list_timelapse_directory(config, debug)
-        
+
         if not latest_video:
             log("No videos available")
             return False
-        
-        # Skip videos that are too small (likely still being created)
+
         if latest_size < MIN_VIDEO_SIZE:
             log(f"Video too small ({latest_size:,} bytes), skipping (likely still being created)")
             return False
-        
-        # Check if this video has changed
+
         last_name, last_size = get_last_state()
-        
+
         if last_name == latest_video and last_size == latest_size:
             log(f"Video unchanged: {latest_video} ({latest_size:,} bytes)")
-            # Don't output anything - only output on new downloads
             return False
-        
+
         log(f"New or changed video: {latest_video} ({latest_size:,} bytes)")
-        
-        # Download it
+
         video_path = download_video(config, latest_video)
-        
+
         if not video_path:
             log("Download failed, will retry on next check")
             return False
-        
-        # Verify the downloaded file
+
         try:
             actual_size = os.path.getsize(video_path)
             if actual_size < MIN_VIDEO_SIZE:
@@ -338,14 +252,11 @@ def check_and_download(config, debug=False):
         except Exception as e:
             log(f"Error verifying downloaded file: {e}")
             return False
-        
-        # Save state only after successful download and validation
+
         save_state(latest_video, actual_size)
-        
-        # Output path to stdout using safe print
         safe_print(video_path)
         return True
-        
+
     except Exception as e:
         log(f"Unexpected error in check_and_download: {e}")
         return False
@@ -353,30 +264,22 @@ def check_and_download(config, debug=False):
 def main():
     """Main function"""
     parser = argparse.ArgumentParser(description='Download latest timelapse from Bambu printer')
-    parser.add_argument('-i', '--interval', type=int,
-                        help='Update interval in seconds (overrides config file)')
+    parser.add_argument('-t', '--interval', type=int, default=DEFAULT_UPDATE_INTERVAL,
+                        help=f'Update interval in seconds (default: {DEFAULT_UPDATE_INTERVAL})')
     parser.add_argument('--once', action='store_true',
                         help='Run once and exit (no loop)')
     parser.add_argument('--debug', action='store_true',
                         help='Show debug information')
     args = parser.parse_args()
-    
+
     try:
-        # Load configuration
-        config = load_config()
-        
+        config = get_config()
+
         if args.debug:
             log(f"Config: PRINTER_HOST={config['PRINTER_HOST']}, FTP_PORT={config['FTP_PORT']}")
-        
-        # Determine update interval
-        if args.interval:
-            update_interval = args.interval
-            log(f"Using command-line interval: {update_interval}s")
-        else:
-            update_interval = int(config['UPDATE_INTERVAL'])
-            log(f"Using config interval: {update_interval}s")
-        
-        # Run once or loop
+
+        log(f"Update interval: {args.interval}s")
+
         if args.once:
             success = check_and_download(config, args.debug)
             sys.exit(0 if success else 1)
@@ -384,33 +287,30 @@ def main():
             log("Starting loop (Ctrl+C to stop)")
             iteration = 0
             consecutive_errors = 0
-            
+
             while True:
                 iteration += 1
                 log(f"Check #{iteration}")
-                
+
                 try:
                     success = check_and_download(config, args.debug and iteration == 1)
-                    
+
                     if success:
                         consecutive_errors = 0
-                    elif consecutive_errors < 5:
-                        # Don't count "no new video" as an error
-                        pass
-                    
+
                 except Exception as e:
                     consecutive_errors += 1
                     log(f"Error in iteration {iteration}: {e}")
-                    
+
                     if consecutive_errors >= 10:
                         log("Too many consecutive errors, exiting")
                         sys.exit(1)
-                
+
                 if iteration == 1:
-                    log(f"Waiting {update_interval}s until next check...")
-                
-                time.sleep(update_interval)
-                
+                    log(f"Waiting {args.interval}s until next check...")
+
+                time.sleep(args.interval)
+
     except KeyboardInterrupt:
         log("Stopped by user")
         sys.exit(0)

@@ -1,10 +1,32 @@
 #!/bin/sh
 
-export OPENAI_API_KEY=sk-proj-7h...
-export PUSHCUT_WEBHOOK_SECRET=uzJ...
-export PYTHONUNBUFFERED=1
+# Printer Configuration
+# Find printer IP in printer's network settings screen
+export BAMBU_PRINTER_IP=192.168.1.100
+# Find access code in printer's WiFi settings (8 characters)
+export BAMBU_ACCESS_CODE=12345678
 
+# OpenAI API Key for AI failure detection
+export OPENAI_API_KEY=sk-proj-your-key-here
+
+# ntfy.sh topic for notifications - no spaces
+TOPIC=your-unique-topic
+
+# message to put on timeout notifications
+MSG1="no activity - check printer"
+
+# message to put on suspect prints
+MSG2="suspicious print - check printer"
+
+# destination of scp, if you are updating a server with latest images
+DEST=user@site.com:/directory/snapshot.jpg
+
+# Change to script directory
 cd ~/bambu-monitor
 PATH=$PATH:~/bambu-monitor
 
-last_avi | loop last_image | loop scp_image {} user@site.com:/directory/snapshot.jpg | loop check | loop notify Bambu
+# Python buffering setting (required for pipes)
+export PYTHONUNBUFFERED=1
+
+# Start monitoring pipeline
+last-avi | watchdog -t 900 notify $TOPIC "$MSG1" | loop last-image | loop scp-image {} "$DEST" | loop check | loop notify $TOPIC "$MSG2"
