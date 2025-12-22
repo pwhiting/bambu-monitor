@@ -29,4 +29,10 @@ PATH=$PATH:~/bambu-monitor
 export PYTHONUNBUFFERED=1
 
 # Start monitoring pipeline
-last-avi | watchdog -t 900 notify $TOPIC "$MSG1" | loop last-image | loop scp-image {} "$DEST" | loop check | loop notify $TOPIC "$MSG2"
+last-avi \
+ | watchdog -t 900 notify $TOPIC "$MSG1" \
+ | loop last-image \
+ | loop scp-image {} "$DEST" \
+ | loop prev-images -n 2 \
+ | loop check \
+ | loop notify $TOPIC "$MSG2"
