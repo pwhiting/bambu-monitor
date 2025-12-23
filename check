@@ -215,7 +215,7 @@ def main():
             sys.exit(1)
 
         # Log model response
-        log(f"Model response: {result}")
+        log(f"Is this failing? (model response): {result}")
 
         # Only output if failure detected (output first image path)
         if result and "yes" in result.lower():
