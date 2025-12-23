@@ -19,7 +19,7 @@ MSG1="no activity - check printer"
 MSG2="suspicious print - check printer"
 
 # destination of scp, if you are updating a server with latest images
-DEST=user@site.com:/directory/snapshot.jpg
+DEST=user@site.com:directory/snapshot.jpg
 
 # Change to script directory
 cd ~/bambu-monitor
