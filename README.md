@@ -4,22 +4,29 @@ A Unix-style pipeline system for monitoring your Bambu Lab 3D printer. Downloads
 
 ## Quickstart
 
-Get up and running in 3 steps:
+Get up and running in 4 steps:
 
-**1. Copy and edit the start script:**
+**1. Install dependencies:**
+Use your OS-specific package manager to install curl ffmpeg openssh-client and python3. Many of these will already be installed. For your python3 environment install requests and openai, again using the mechansim that works on your OS. Below I'll provide the example for linux.
+
+```bash
+sudo apt install curl ffmpeg openssh-client python3 python3-requests python3-openai
+```
+
+**2. Copy and edit the start script:**
 ```bash
 cd ~/bambu-monitor
 cp start.sample start
-nano start  # or vim, emacs, etc.
+vi start  # or whatever you use
 ```
 
-**2. Edit these values in `start`:**
+**3. Edit these values in `start`:**
 - `BAMBU_PRINTER_IP` - Your printer's IP address (find in printer's Network settings)
 - `BAMBU_ACCESS_CODE` - 8-character code from printer's WiFi settings
 - `OPENAI_API_KEY` - Your OpenAI API key from https://platform.openai.com
 - `TOPIC` - Pick a unique ntfy.sh topic name (e.g., `bambu-printer-xyz123`)
 
-**3. Run it:**
+**4. Run it:**
 ```bash
 chmod +x start
 ./start
@@ -220,7 +227,12 @@ Each step only fires when the previous step outputs something, so you only get n
 - OpenAI API key - for AI print failure detection (optional)
 - ntfy app - for phone notifications (optional, completely free)
 
-**Install on Ubuntu/Debian:**
+**Install on Ubuntu:**
+```bash
+sudo apt install curl ffmpeg openssh-client python3 python3-requests python3-openai
+```
+
+**Install on other Linux:**
 ```bash
 sudo apt install curl ffmpeg openssh-client python3 python3-pip
 pip3 install requests openai
@@ -228,10 +240,13 @@ pip3 install requests openai
 
 **Install on macOS:**
 ```bash
-brew install curl ffmpeg python3
+brew install ffmpeg
 pip3 install requests openai
 ```
-
+If your python environment is managed by homebrew, you may need to install the python packages using brew instead of pip3.
+```bash
+brew install python3-requests python3-openai
+```
 ## Script Reference
 
 ### last-avi
